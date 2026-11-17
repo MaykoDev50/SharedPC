@@ -13,6 +13,9 @@ if (Running) {
     for ($i = 0; $i -lt 36 -and (Running); $i++) { Start-Sleep -Seconds 5 }
     if (Running) { & $vbm controlvm SharedPC poweroff 2>&1 | Out-Null; Start-Sleep -Seconds 5 }
 }
+# Remote Desktop refuses 127.0.0.1, so make sure the RDP port-forward is on 127.0.0.2
+& $vbm modifyvm SharedPC --natpf1 delete rdp 2>&1 | Out-Null
+& $vbm modifyvm SharedPC --natpf1 'rdp,tcp,127.0.0.2,13389,,3389' 2>&1 | Out-Null
 Write-Host 'Starting it again...'
 & $vbm startvm SharedPC --type headless 2>&1 | Out-Null
 [System.Windows.Forms.MessageBox]::Show("המחשב המשותף מופעל מחדש.`nהוא יהיה מוכן בעוד כ-3 דקות.", 'SharedPC') | Out-Null
