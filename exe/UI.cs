@@ -170,6 +170,9 @@ namespace SharedPC
         // header
         Chip chipCount = new Chip { Icon = "🖥️", Tint = T.Accent }, chipRam = new Chip { Icon = "🧠", Tint = T.Accent2 }, chipDisk = new Chip { Icon = "💾", Tint = T.Green };
         Label routerLbl = T.Lbl("🌐 בודק את הראוטר…", 10, true, T.Yellow);
+        Label siteLbl = T.Lbl("🌍 אתר ללקוחות: …", 10, true, T.Accent2);
+        FlowLayoutPanel siteRow = new FlowLayoutPanel();
+        string SiteUrl() { return "http://" + publicIp + ":" + App.WebPort; }
         // list
         FlowLayoutPanel list = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, BackColor = T.Bg, Padding = new Padding(0, 4, 8, 4) };
         Label listEmpty = T.Lbl("עדיין אין מחשבים.\nלחץ \"מחשב חדש\" כדי להתחיל.", 11, false, T.Muted);
@@ -198,7 +201,7 @@ namespace SharedPC
             Text = App.Title + "  ·  גרסה " + App.Version; Size = new Size(1240, 800); MinimumSize = new Size(1040, 680);
 
             // ---------- header ----------
-            var header = new Panel { Dock = DockStyle.Top, Height = 182, BackColor = T.Bg, Padding = new Padding(22, 16, 22, 0) };
+            var header = new Panel { Dock = DockStyle.Top, Height = 216, BackColor = T.Bg, Padding = new Padding(22, 16, 22, 0) };
             var titleRow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 54, BackColor = T.Bg, WrapContents = false };
             titleRow.Controls.Add(T.Lbl("SharedPC", 22, true, T.Text));
             var sub = T.Lbl("ניהול מחשבים וירטואליים", 11, false, T.Muted); sub.Margin = new Padding(10, 14, 0, 0); titleRow.Controls.Add(sub);
@@ -210,7 +213,12 @@ namespace SharedPC
             var chipRow = new Panel { Dock = DockStyle.Top, Height = 70, BackColor = T.Bg };
             chipRow.Controls.Add(chips); chipRow.Controls.Add(newWrap);
             routerLbl.Dock = DockStyle.Top; routerLbl.AutoSize = false; routerLbl.Height = 24; routerLbl.TextAlign = ContentAlignment.MiddleRight;
-            header.Controls.Add(routerLbl); header.Controls.Add(chipRow); header.Controls.Add(titleRow);
+            siteRow.Dock = DockStyle.Top; siteRow.Height = 34; siteRow.BackColor = T.Bg; siteRow.WrapContents = false;
+            siteLbl.Margin = new Padding(0, 8, 0, 0);
+            var openSite = new Btn("פתח", T.Card, 64, 28); openSite.Font = T.F(9, true); openSite.Click += (s, e) => Process.Start("http://127.0.0.1:" + App.WebPort + "/");
+            var copySite = new Btn("העתק", T.Card, 64, 28); copySite.Font = T.F(9, true); copySite.Click += (s, e) => CopyText(SiteUrl());
+            siteRow.Controls.AddRange(new Control[] { siteLbl, copySite, openSite });
+            header.Controls.Add(siteRow); header.Controls.Add(routerLbl); header.Controls.Add(chipRow); header.Controls.Add(titleRow);
 
             // ---------- list (right side) ----------
             var left = new Panel { Dock = DockStyle.Left, Width = 330, BackColor = T.Bg, Padding = new Padding(22, 10, 0, 20) };
@@ -328,7 +336,7 @@ namespace SharedPC
                     var n = Store.S(r, "name"); var s = App.VmState(n); st[n] = s;
                     if (s == "running") { running++; ramOn += Store.I(r, "ramGB"); }
                 }
-                var ready = recs.Where(r => Store.S(r, "status") == "ready").Select(r => Store.I(r, "port")).Where(p => p > 0).ToList();
+                var ready = recs.Where(r => Store.S(r, "status") == "ready").Select(r => Store.I(r, "port")).Where(p => p > 0).ToList(); ready.Add(App.WebPort);
                 var key = string.Join(",", ready.OrderBy(p => p));
                 if (publicIp != "…" && (key != lastPorts || (DateTime.Now - lastSync).TotalMinutes > 10))
                 { Router.Sync(lanIp, publicIp, ready); lastPorts = key; lastSync = DateTime.Now; }
@@ -348,6 +356,7 @@ namespace SharedPC
                     foreach (var c in new[] { chipCount, chipRam, chipDisk }) c.Invalidate();
                     routerLbl.Text = "🌐  " + Router.Status + "     ·     IP: " + publicIp;
                     routerLbl.ForeColor = Router.Ok ? T.Green : T.Yellow;
+                    siteLbl.Text = "🌍 אתר ללקוחות:  " + SiteUrl() + "   (הלקוח נכנס עם שם המשתמש והסיסמה שלו)";
                     ShowSelected();
                 }));
             });
@@ -543,7 +552,8 @@ namespace SharedPC
         {
             var r = Store.Get(selected); if (r == null) return;
             if (Store.S(r, "status") != "ready") { App.Say("המחשב עוד לא מוכן."); return; }
-            var txt = "חיבור לשולחן עבודה מרוחק (mstsc)\r\nכתובת: " + publicIp + ":" + Store.S(r, "port") + "\r\nשם משתמש: " + App.FullUser(r) + "\r\nסיסמה: " + Store.S(r, "password");
+            var txt = "חיבור לשולחן עבודה מרוחק (mstsc)\r\nכתובת: " + publicIp + ":" + Store.S(r, "port") + "\r\nשם משתמש: " + App.FullUser(r) + "\r\nסיסמה: " + Store.S(r, "password") +
+                      "\r\n\r\nאתר לניהול המחשב שלך: " + SiteUrl() + "\r\n(נכנסים עם אותו שם משתמש וסיסמה)";
             Clipboard.SetText(txt); App.Say(txt + "\n\n✅ הועתק – הדבק (Ctrl+V) ושלח ללקוח.");
         }
         void ConnectMyself()

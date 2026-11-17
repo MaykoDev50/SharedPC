@@ -14,13 +14,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("3.0.0.0")]
+[assembly: AssemblyVersion("3.1.0.0")]
 
 namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "3.0.0";
+        public const string Version = "3.1.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -28,7 +28,8 @@ namespace SharedPC
         public static readonly string Iso = Path.Combine(HostDir, "WindowsServer2022.iso");
         public static readonly string VBM = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Oracle\VirtualBox\VBoxManage.exe");
         const string Repo = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/manager/";
-        static readonly string[] Scripts = { "common.ps1", "create-vm.ps1", "setup-client.ps1" };
+        static readonly string[] Scripts = { "common.ps1", "create-vm.ps1", "setup-client.ps1", "client-portal.ps1" };
+        public const int WebPort = 8080;
 
         [STAThread]
         static void Main()
@@ -115,6 +116,15 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
 ", new UTF8Encoding(true));
             Run("schtasks.exe", "/Create /F /TN \"SharedPC - start VMs at login\" /SC ONLOGON /RL HIGHEST /DELAY 0000:30 /TR \"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + startAll + "\"");
             Run("schtasks.exe", "/Delete /F /TN \"SharedPC - start VM at login\"");
+
+            // client website: runs in the background (same account as the computers), restarted so it uses the newest version
+            var portal = Path.Combine(ScriptDir, "client-portal.ps1");
+            Run("schtasks.exe", "/Create /F /TN \"SharedPC - client website\" /SC ONLOGON /RL HIGHEST /TR \"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + portal + "\"");
+            Run("netsh.exe", "advfirewall firewall delete rule name=\"SharedPC client website\"");
+            Run("netsh.exe", "advfirewall firewall add rule name=\"SharedPC client website\" dir=in action=allow protocol=TCP localport=" + WebPort);
+            Run("schtasks.exe", "/End /TN \"SharedPC - client website\"");
+            Thread.Sleep(800);
+            Run("schtasks.exe", "/Run /TN \"SharedPC - client website\"");
         }
 
         // ---------- processes ----------
