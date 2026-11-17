@@ -206,6 +206,41 @@ function New-PortalUser($f) {
     return $null
 }
 
+# "username only" login: the password is derived from the invite code, so the app can compute it too
+function Get-QuickPassword([string]$u) {
+    $h = New-Object System.Security.Cryptography.HMACSHA256 (,[Text.Encoding]::UTF8.GetBytes($InviteCode))
+    $b = $h.ComputeHash([Text.Encoding]::UTF8.GetBytes($u.ToLowerInvariant()))
+    ([Convert]::ToBase64String($b).Substring(0, 16) -replace '[+/=]', 'x') + 'Aa1!'
+}
+
+function Invoke-QuickLogin($f) {
+    if ((Get-Date) -lt $script:LockUntil) { return 'יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.' }
+    if ($f['invite'] -cne $InviteCode) {
+        $script:Fails++
+        if ($script:Fails -ge 5) { $script:LockUntil = (Get-Date).AddMinutes(10); $script:Fails = 0 }
+        return 'קוד ההזמנה שגוי.'
+    }
+    $script:Fails = 0
+    $u = [string]$f['username']
+    if ($u -notmatch '^[A-Za-z0-9._-]{3,20}$') { return 'שם המשתמש חייב להיות באנגלית, 3–20 תווים.' }
+    $sec = ConvertTo-SecureString (Get-QuickPassword $u) -AsPlainText -Force
+    try {
+        if (Get-LocalUser -Name $u -ErrorAction SilentlyContinue) {
+            if ($u -notin @(Get-PortalUsers)) { return 'אי אפשר להשתמש בשם הזה.' }
+            Set-LocalUser -Name $u -Password $sec
+        } else {
+            if (@(Get-PortalUsers).Count -ge $MaxUsers) { return "הגעתם למספר המשתמשים המרבי ($MaxUsers)." }
+            New-LocalUser -Name $u -Password $sec -FullName $u -PasswordNeverExpires -AccountNeverExpires `
+                -Description 'Created by SharedPC app' | Out-Null
+            Add-LocalGroupMember -Group $RduGroup    -Member $u
+            Add-LocalGroupMember -Group $PortalGroup -Member $u
+            if ($MakeAdmins) { Add-LocalGroupMember -Group $AdminGroup -Member $u }
+            Write-Log "User '$u' created (quick login)"
+        }
+    } catch { return "Windows לא אישר: $($_.Exception.Message)" }
+    return $null
+}
+
 function Handle($ctx) {
     $req  = $ctx.Request
     $path = $req.Url.AbsolutePath.TrimEnd('/')
@@ -251,6 +286,14 @@ function Handle($ctx) {
                 'autoreconnection enabled:i:1', 'authentication level:i:2', 'prompt for credentials:i:0'
             ) -join "`r`n"
             Send $ctx 200 $rdp 'application/x-rdp' @{ 'Content-Disposition' = "attachment; filename=`"SharedPC-$u.rdp`"" }
+            return
+        }
+
+        '/api/quick' {
+            if ($req.HttpMethod -ne 'POST') { Send $ctx 405 '{"ok":false}' 'application/json'; return }
+            $err = Invoke-QuickLogin (Read-Form $req)
+            $res = if ($err) { @{ ok = $false; error = $err } } else { @{ ok = $true } }
+            Send $ctx $(if ($err) { 400 } else { 200 }) ($res | ConvertTo-Json) 'application/json; charset=utf-8'
             return
         }
 
