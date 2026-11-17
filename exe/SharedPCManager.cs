@@ -18,7 +18,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("2.0.3.0")]
+[assembly: AssemblyVersion("2.0.4.0")]
 
 namespace SharedPC
 {
@@ -32,7 +32,7 @@ namespace SharedPC
         const string Repo = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/manager/";
         static readonly string[] Scripts = { "common.ps1", "create-vm.ps1", "setup-client.ps1" };
         public const string Title = "ניהול מחשבים וירטואליים";
-        public const string Version = "2.0.3";
+        public const string Version = "2.0.4";
 
         public static readonly Color Bg = Color.FromArgb(15, 23, 42), Card = Color.FromArgb(30, 41, 59), Fg = Color.FromArgb(226, 232, 240),
             Muted = Color.FromArgb(148, 163, 184), Blue = Color.FromArgb(37, 99, 235), Red = Color.FromArgb(153, 27, 27), Green = Color.FromArgb(22, 101, 52);
@@ -264,7 +264,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             grid.ColumnHeadersDefaultCellStyle.BackColor = App.Bg; grid.ColumnHeadersDefaultCellStyle.ForeColor = App.Muted;
             grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10, FontStyle.Bold);
             grid.AccessibleName = "רשימת המחשבים";
-            foreach (var c in new[] { "שם", "מצב", "שם משתמש", "נפח לקבצים (GB)", "זיכרון (GB)", "כתובת לחיבור" }) grid.Columns.Add(c, c);
+            foreach (var c in new[] { "שם", "מצב", "שם משתמש", "נפח (GB)", "זיכרון (GB)", "כתובת בבית", "כתובת מבחוץ" }) grid.Columns.Add(c, c);
             grid.Columns[1].FillWeight = 180;
             grid.CellDoubleClick += (s, e) => CopyDetails();
             var gridWrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 6, 16, 6) };
@@ -330,7 +330,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                     else if (status == "failed") txt = "❌ נכשל: " + Store.S(r, "step");
                     else txt = state == "running" ? "🟢 פועל" : state == "missing" ? "⚠️ לא נמצא" : "⚪ כבוי";
                     if (state == "running") ramOn += Store.I(r, "ramGB");
-                    rows.Add(new object[] { name, txt, Store.S(r, "user"), Store.S(r, "diskGB"), Store.S(r, "ramGB"), publicIp + ":" + Store.S(r, "port") });
+                    rows.Add(new object[] { name, txt, MainForm.CompName(name) + "\\" + Store.S(r, "user"), Store.S(r, "diskGB"), Store.S(r, "ramGB"), lanIp + ":" + Store.S(r, "port"), publicIp + ":" + Store.S(r, "port") });
                 }
                 return Tuple.Create(rows, ramOn);
             }).ContinueWith(t =>
@@ -379,7 +379,12 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
 
         string Details(Dictionary<string, object> r)
         {
-            return "כתובת (חיבור לשולחן עבודה מרוחק): " + publicIp + ":" + Store.S(r, "port") + "\r\nשם משתמש: " + Store.S(r, "user") + "\r\nסיסמה: " + Store.S(r, "password");
+            var name = Store.S(r, "name"); var port = Store.S(r, "port");
+            return "חיבור לשולחן עבודה מרוחק\r\n" +
+                   "כתובת (מתוך הבית): " + lanIp + ":" + port + "\r\n" +
+                   "כתובת (מחוץ לבית): " + publicIp + ":" + port + "\r\n" +
+                   "שם משתמש: " + CompName(name) + "\\" + Store.S(r, "user") + "\r\n" +
+                   "סיסמה: " + Store.S(r, "password");
         }
         void CopyDetails()
         {
