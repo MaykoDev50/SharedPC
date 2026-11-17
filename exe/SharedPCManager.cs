@@ -18,7 +18,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.1.0")]
 
 namespace SharedPC
 {
@@ -132,7 +132,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
         public static string VmState(string name)
         {
             var info = VBox("showvminfo \"PC-" + name + "\" --machinereadable");
-            foreach (var line in info.Split('\n'))
+            foreach (var line in info.Split(new[] { '\n' }))
                 if (line.StartsWith("VMState=")) return line.Substring(8).Trim().Trim('"');
             return "missing";
         }

@@ -24,9 +24,10 @@ function Read-VmRecords {
     if (-not (Test-Path $script:VmsFile)) { return @() }
     $raw = Get-Content $script:VmsFile -Raw -Encoding UTF8
     if (-not $raw.Trim()) { return @() }
-    @($raw | ConvertFrom-Json)
+    # (...) | ForEach-Object unrolls the array (PowerShell 5.1 returns a JSON array as ONE object)
+    @(($raw | ConvertFrom-Json) | ForEach-Object { $_ })
 }
-function Write-VmRecords($list) { ConvertTo-Json @($list) -Depth 4 | Set-Content $script:VmsFile -Encoding UTF8 }
+function Write-VmRecords($list) { ConvertTo-Json -InputObject @($list) -Depth 4 | Set-Content $script:VmsFile -Encoding UTF8 }
 function Get-VmRecords { Use-VmsLock { Read-VmRecords } }
 function Add-VmRecord($rec) { Use-VmsLock { $l = @(Read-VmRecords) + $rec; Write-VmRecords $l } }
 function Remove-VmRecord([string]$name) { Use-VmsLock { Write-VmRecords @(Read-VmRecords | Where-Object { $_.name -ne $name }) } }
