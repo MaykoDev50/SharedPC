@@ -36,7 +36,6 @@ trap {
     Log "FAILED: $($_.Exception.Message) (line $($_.InvocationInfo.ScriptLineNumber))"
     foreach ($m in $mounted) { try { Dismount-DiskImage -ImagePath $m -ErrorAction SilentlyContinue | Out-Null } catch {} }
     Update-VmRecord $Name @{ status = 'failed'; step = $_.Exception.Message }
-    Read-Host 'Press Enter to close'
     exit 1
 }
 if (-not (Test-Path $Iso)) { throw "Windows Server ISO not found at $Iso" }
