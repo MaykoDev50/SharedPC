@@ -302,9 +302,11 @@ if (-not $tsIp) {
         $st = Get-SetupStatus
         if ($st) {
             $tsIp = $st.tailscaleIp
-            if (-not $tsIp -and $st.loginUrl -and -not $opened) {
+            $lu = $st.loginUrl
+            if ($lu -and $lu -isnot [string]) { $lu = [string]$lu.value }   # older portal versions wrap the text
+            if (-not $tsIp -and $lu -and -not $opened) {
                 Log 'WAITING FOR YOU: log in to Tailscale in the browser window that just opened'
-                Start-Process $st.loginUrl
+                Start-Process $lu
                 $opened = $true
                 Popup "נפתח דף התחברות של Tailscale בדפדפן.`n`nהתחבר עם החשבון שלך (למשל Google) ואשר את המחשב 'sharedpc'.`nההתקנה תמשיך לבד ברגע שתסיים." | Out-Null
             }

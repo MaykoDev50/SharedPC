@@ -264,7 +264,7 @@ function Handle($ctx) {
             $status = [ordered]@{
                 firstbootDone = (Test-Path 'C:\SharedPC\firstboot-done.txt')
                 tailscaleIp   = $tsIp
-                loginUrl      = (Get-Content 'C:\SharedPC\tailscale-login.txt' -ErrorAction SilentlyContinue | Select-Object -First 1)
+                loginUrl      = [string](Get-Content 'C:\SharedPC\tailscale-login.txt' -ErrorAction SilentlyContinue | Select-Object -First 1)
                 version       = (Get-LocalVersion)
             }
             Send $ctx 200 ($status | ConvertTo-Json) 'application/json; charset=utf-8'
