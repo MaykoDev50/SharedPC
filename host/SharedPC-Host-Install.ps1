@@ -1,9 +1,6 @@
-﻿# SharedPC - automatic installer for the HOST computer (Windows 10/11 Pro)
-# Does everything: Hyper-V, downloads Windows Server 2022 (evaluation), builds the VM,
-# installs the SharedPC portal inside it, connects it to Tailscale.
+﻿# SharedPC - automatic installer for the HOST computer (works on Windows 10/11 Home, 100% free)
+# VirtualBox + Windows Server 2022 (evaluation) + SharedPC portal + Tailscale.
 # Safe to run again: every step checks what is already done and continues from there.
-
-param([switch]$Resume)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -11,22 +8,23 @@ $ProgressPreference    = 'SilentlyContinue'
 # --- relaunch as Administrator ---
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $a = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    if ($Resume) { $a += ' -Resume' }
-    Start-Process powershell.exe -Verb RunAs -ArgumentList $a
+    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     exit
 }
 
 Add-Type -AssemblyName System.Windows.Forms
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $HostDir    = 'C:\SharedPC-Host'
-$StatusLog  = Join-Path $PSScriptRoot 'status.log'      # next to this script (Downloads)
+$StatusLog  = Join-Path $PSScriptRoot 'status.log'
 $StateFile  = Join-Path $HostDir 'state.json'
 $SecretFile = Join-Path $HostDir 'passwords.txt'
 $Iso        = Join-Path $HostDir 'WindowsServer2022.iso'
-$Vhd        = Join-Path $HostDir 'SharedPC.vhdx'
+$Vhd        = Join-Path $HostDir 'SharedPC.vhd'
 $VMName     = 'SharedPC'
+$StartTask  = 'SharedPC - start VM at login'
 $RepoRaw    = 'https://raw.githubusercontent.com/MaykoDev50/SharedPC/main'
-$ResumeTask = 'SharedPC Installer (resume after restart)'
+$PortalPort = 18080   # http://localhost:18080 -> portal inside the VM
+$RdpPort    = 13389   # localhost:13389      -> remote desktop inside the VM
 $IsoUrls    = @(
     'https://go.microsoft.com/fwlink/p/?LinkID=2195280&clcid=0x409&culture=en-us&country=US',
     'https://software-download.microsoft.com/download/sg/20348.169.210806-2348.fe_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso',
@@ -49,30 +47,27 @@ function Fail([string]$why, [string]$hebrew) {
     Popup "ההתקנה נעצרה:`n`n$hebrew`n`nפרטים: $why" | Out-Null
     exit 1
 }
-function Load-State {
-    if (Test-Path $StateFile) { Get-Content $StateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
-}
-function Save-State($s) { $s | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8 }
+function Load-State { if (Test-Path $StateFile) { Get-Content $StateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} } }
 function Set-StateValue($s, [string]$k, $v) {
     if ($s.PSObject.Properties[$k]) { $s.$k = $v } else { $s | Add-Member -NotePropertyName $k -NotePropertyValue $v }
-    Save-State $s
+    $s | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
 }
+function Has($s, [string]$k) { [bool]$s.PSObject.Properties[$k] }
 function New-RandomPassword {
     $u = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; $l = 'abcdefghijkmnpqrstuvwxyz'; $d = '23456789'
-    $chars = @()
-    1..4 | ForEach-Object { $chars += $u[(Get-Random -Max $u.Length)]; $chars += $l[(Get-Random -Max $l.Length)]; $chars += $d[(Get-Random -Max $d.Length)] }
-    (($chars | Sort-Object { Get-Random }) -join '') + '!'
+    $c = @(); 1..4 | ForEach-Object { $c += $u[(Get-Random -Max $u.Length)]; $c += $l[(Get-Random -Max $l.Length)]; $c += $d[(Get-Random -Max $d.Length)] }
+    (($c | Sort-Object { Get-Random }) -join '') + '!'
 }
-function Remove-ResumeTask { Unregister-ScheduledTask -TaskName $ResumeTask -Confirm:$false -ErrorAction SilentlyContinue }
-function Register-ResumeTask {
-    $user = "$env:USERDOMAIN\$env:USERNAME"
-    $act  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Resume"
-    $trg  = New-ScheduledTaskTrigger -AtLogOn -User $user
-    $prn  = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
-    Register-ScheduledTask -TaskName $ResumeTask -Action $act -Trigger $trg -Principal $prn -Force | Out-Null
+function Download([string]$url, [string]$dest) {
+    & curl.exe -L --fail -s --retry 5 --retry-delay 5 -o $dest $url
+    return ($LASTEXITCODE -eq 0 -and (Test-Path $dest) -and (Get-Item $dest).Length -gt 0)
+}
+function VBox { & $script:VBM @args; if ($LASTEXITCODE -ne 0) { throw "VBoxManage $($args -join ' ') failed ($LASTEXITCODE)" } }
+function Get-SetupStatus {
+    try { Invoke-RestMethod "http://127.0.0.1:$PortalPort/setup-status" -TimeoutSec 10 } catch { $null }
 }
 
-Log '=============== SharedPC host installer started ==============='
+Log '=============== SharedPC host installer (VirtualBox) started ==============='
 $state = Load-State
 
 # ---------- 1. check this computer ----------
@@ -81,36 +76,43 @@ $cs  = Get-CimInstance Win32_ComputerSystem
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $ramGB  = [math]::Round($cs.TotalPhysicalMemory / 1GB)
 $freeGB = [math]::Round((Get-PSDrive C).Free / 1GB)
-Log "Computer: $($os.Caption) (build $($os.BuildNumber)), RAM ${ramGB}GB, free on C: ${freeGB}GB, CPU: $($cpu.Name.Trim()), cores: $($cpu.NumberOfLogicalProcessors)"
-Log "Virtualization in BIOS: $($cpu.VirtualizationFirmwareEnabled), hypervisor running: $($cs.HypervisorPresent)"
-
-if ($os.Caption -match 'Home') {
-    Fail 'Windows Home edition has no Hyper-V' 'ל-Windows Home אין Hyper-V. צריך Windows Pro (אפשר לשדרג בהגדרות ← הפעלה).'
-}
-if ($ramGB -lt 7)  { Fail "Only ${ramGB}GB RAM" 'צריך לפחות 8GB זיכרון במחשב.' }
-$needGB = 35; if (Test-Path $Iso) { $needGB = 25 }
-if (-not (Test-Path $Vhd) -and $freeGB -lt $needGB) { Fail "Only ${freeGB}GB free on C:" "צריך לפחות $needGB GB פנויים בכונן C." }
+Log "Computer: $($os.Caption) (build $($os.BuildNumber)), RAM ${ramGB}GB, free on C: ${freeGB}GB, CPU: $($cpu.Name.Trim()), threads: $($cpu.NumberOfLogicalProcessors)"
+Log "Virtualization in BIOS: $($cpu.VirtualizationFirmwareEnabled), Windows hypervisor running: $($cs.HypervisorPresent)"
+if ($ramGB -lt 7) { Fail "Only ${ramGB}GB RAM" 'צריך לפחות 8GB זיכרון במחשב.' }
+if (-not (Test-Path $Vhd) -and $freeGB -lt 35) { Fail "Only ${freeGB}GB free on C:" 'צריך לפחות 35GB פנויים בכונן C.' }
 if (-not $cpu.VirtualizationFirmwareEnabled -and -not $cs.HypervisorPresent) {
-    Fail 'Virtualization is disabled in BIOS/UEFI' 'הווירטואליזציה כבויה ב-BIOS. צריך להיכנס ל-BIOS ולהפעיל Intel VT-x / AMD SVM, ואז להריץ שוב.'
+    Fail 'Virtualization is disabled in BIOS/UEFI' 'הווירטואליזציה כבויה ב-BIOS. צריך להפעיל Intel VT-x / AMD SVM ב-BIOS ולהריץ שוב.'
 }
+if ($cs.HypervisorPresent) { Log 'Note: a Windows hypervisor is active (WSL/Memory integrity) - VirtualBox still works, a bit slower' }
 
-# ---------- 2. Hyper-V ----------
-$needReboot = $false
-$hv = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
-if ($hv.State -ne 'Enabled') {
-    Log 'Enabling Hyper-V...'
-    $r = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart
-    $needReboot = $true
-    Log "Hyper-V enabled (restart needed: $($r.RestartNeeded))"
-} elseif (-not (Get-Command New-VM -ErrorAction SilentlyContinue) -or
-          (Get-Service vmms -ErrorAction SilentlyContinue).Status -ne 'Running') {
-    $needReboot = $true
-    Log 'Hyper-V is enabled but not active yet - restart needed'
-} else {
-    Log 'Hyper-V is ready'
+# ---------- 2. VirtualBox (free) ----------
+$script:VBM = Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'
+if (-not (Test-Path $script:VBM)) {
+    Log 'Installing Microsoft Visual C++ runtime (needed by VirtualBox)...'
+    $vc = Join-Path $HostDir 'vc_redist.x64.exe'
+    if (Download 'https://aka.ms/vs/17/release/vc_redist.x64.exe' $vc) {
+        Start-Process $vc -ArgumentList '/install', '/quiet', '/norestart' -Wait
+    }
+    Log 'Installing VirtualBox...'
+    if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+        & winget.exe install --id Oracle.VirtualBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null
+    }
+    if (-not (Test-Path $script:VBM)) {
+        Log 'winget did not install it - downloading from virtualbox.org...'
+        $ver  = ((& curl.exe -L -s 'https://download.virtualbox.org/virtualbox/LATEST-STABLE.TXT') -join '').Trim()
+        $list = (& curl.exe -L -s "https://download.virtualbox.org/virtualbox/$ver/") -join "`n"
+        if ($list -match "(VirtualBox-$([regex]::Escape($ver))-\d+-Win\.exe)") {
+            $exe = Join-Path $HostDir $Matches[1]
+            if (Download "https://download.virtualbox.org/virtualbox/$ver/$($Matches[1])" $exe) {
+                Start-Process $exe -ArgumentList '--silent', '--ignore-reboot' -Wait
+            }
+        }
+    }
+    if (-not (Test-Path $script:VBM)) { Fail 'VirtualBox installation failed' 'ההתקנה של VirtualBox נכשלה.' }
 }
+Log "VirtualBox ready: $(& $script:VBM --version)"
 
-# ---------- 3. download Windows Server 2022 (evaluation) ----------
+# ---------- 3. download Windows Server 2022 (evaluation, free) ----------
 function Test-Iso([string]$path) {
     if (-not (Test-Path $path) -or (Get-Item $path).Length -lt 3GB) { return $false }
     try {
@@ -121,15 +123,12 @@ function Test-Iso([string]$path) {
         return $ok
     } catch { try { Dismount-DiskImage -ImagePath $path | Out-Null } catch {}; return $false }
 }
-
-if (-not $state.PSObject.Properties['IsoOk']) {
-    if (Test-Iso $Iso) { Set-StateValue $state 'IsoOk' $true }
-}
-if (-not $state.PSObject.Properties['IsoOk']) {
+if (-not (Has $state 'IsoOk') -and (Test-Iso $Iso)) { Set-StateValue $state 'IsoOk' $true }
+if (-not (Has $state 'IsoOk')) {
     foreach ($u in $IsoUrls) {
         Log "Downloading Windows Server 2022 (about 4.7GB) from $u"
         $part = "$Iso.part"
-        & curl.exe -L --fail --retry 10 --retry-delay 5 -C - -o $part $u
+        & curl.exe -L --fail --retry 10 --retry-delay 5 -o $part $u
         if ($LASTEXITCODE -eq 0 -and (Test-Path $part) -and (Get-Item $part).Length -gt 3GB) {
             Move-Item $part $Iso -Force
             if (Test-Iso $Iso) { Set-StateValue $state 'IsoOk' $true; Log 'Download complete and verified'; break }
@@ -139,39 +138,29 @@ if (-not $state.PSObject.Properties['IsoOk']) {
             Remove-Item $part -Force -ErrorAction SilentlyContinue
         }
     }
-    if (-not $state.PSObject.Properties['IsoOk']) {
-        Fail 'Could not download the Windows Server ISO' 'לא הצלחתי להוריד את Windows Server. בדוק את החיבור לאינטרנט והרץ שוב.'
-    }
+    if (-not (Has $state 'IsoOk')) { Fail 'Could not download the Windows Server ISO' 'לא הצלחתי להוריד את Windows Server. בדוק את האינטרנט והרץ שוב.' }
 } else { Log 'Windows Server ISO already downloaded' }
 
-# ---------- restart if Hyper-V needs it ----------
-if ($needReboot) {
-    Register-ResumeTask
-    Log 'WAITING FOR RESTART: Hyper-V needs a restart. The installer will continue automatically after login.'
-    $ans = Popup "Hyper-V הותקן, וצריך להפעיל מחדש את המחשב.`n`nאחרי ההפעלה מחדש וההתחברות, ההתקנה תמשיך לבד.`n`nלהפעיל מחדש עכשיו?" 'YesNo'
-    if ($ans -eq 'Yes') { Restart-Computer -Force }
-    exit 0
-}
-Remove-ResumeTask
-Import-Module Hyper-V
-
-# ---------- 4. build the virtual disk (Windows applied directly, no setup screens) ----------
-if (-not $state.PSObject.Properties['AdminPassword']) { Set-StateValue $state 'AdminPassword' (New-RandomPassword) }
-if (-not $state.PSObject.Properties['InviteCode']) {
+# ---------- 4. build the virtual disk (Windows applied directly - no setup screens) ----------
+if (-not (Has $state 'AdminPassword')) { Set-StateValue $state 'AdminPassword' (New-RandomPassword) }
+if (-not (Has $state 'InviteCode')) {
     Set-StateValue $state 'InviteCode' (-join ((50..57) + (65..72) + (74..78) + (80..90) | Get-Random -Count 8 | ForEach-Object { [char]$_ }))
 }
 $AdminPw = [string]$state.AdminPassword
 
-if (-not $state.PSObject.Properties['DiskReady']) {
-    if (Get-VM -Name $VMName -ErrorAction SilentlyContinue) { Fail 'A VM named SharedPC already exists' 'כבר קיימת מכונה וירטואלית בשם SharedPC. מחק אותה ב-Hyper-V Manager והרץ שוב.' }
-    if (Test-Path $Vhd) { Dismount-VHD -Path $Vhd -ErrorAction SilentlyContinue; Remove-Item $Vhd -Force }
+if (-not (Has $state 'DiskReady')) {
+    & $script:VBM unregistervm $VMName 2>$null | Out-Null
+    & $script:VBM closemedium disk $Vhd 2>$null | Out-Null
+    if (Test-Path $Vhd) { Dismount-DiskImage -ImagePath $Vhd -ErrorAction SilentlyContinue | Out-Null; Remove-Item $Vhd -Force }
 
-    Log 'Creating virtual disk (127GB, grows as needed)...'
-    New-VHD -Path $Vhd -SizeBytes 127GB -Dynamic | Out-Null
-    $disk = Mount-VHD -Path $Vhd -Passthru | Get-Disk
+    Log 'Creating virtual disk (127GB max, grows as needed)...'
+    $dp = Join-Path $HostDir 'create-vhd.txt'
+    "create vdisk file=`"$Vhd`" maximum=130048 type=expandable" | Set-Content $dp -Encoding ASCII
+    & diskpart.exe /s $dp | Out-Null
+    if (-not (Test-Path $Vhd)) { Fail 'diskpart could not create the virtual disk' 'לא הצלחתי ליצור דיסק וירטואלי.' }
+    $disk = Mount-DiskImage -ImagePath $Vhd -NoDriveLetter -PassThru | Get-Disk
     $n = $disk.Number
     Initialize-Disk -Number $n -PartitionStyle GPT
-    # system partition is created as basic-data first so it can get a drive letter; switched to EFI type afterwards
     $sys = New-Partition -DiskNumber $n -Size 300MB -AssignDriveLetter
     Format-Volume -Partition $sys -FileSystem FAT32 -NewFileSystemLabel 'System' -Confirm:$false | Out-Null
     New-Partition -DiskNumber $n -Size 16MB -GptType '{e3c9e316-0b5c-4db8-817d-f92df00215ae}' | Out-Null
@@ -186,7 +175,7 @@ if (-not $state.PSObject.Properties['DiskReady']) {
     $images = Get-WindowsImage -ImagePath $wim
     $pick = $images | Where-Object { $_.ImageName -match 'Standard' -and $_.ImageName -match 'Desktop' } | Select-Object -First 1
     if (-not $pick) { $pick = $images | Where-Object { $_.ImageName -match 'Desktop' } | Select-Object -First 1 }
-    Log "Installing '$($pick.ImageName)' onto the virtual disk (takes 5-15 minutes)..."
+    Log "Installing '$($pick.ImageName)' onto the virtual disk (5-15 minutes)..."
     Expand-WindowsImage -ImagePath $wim -Index $pick.ImageIndex -ApplyPath "${W}:\" | Out-Null
     Dismount-DiskImage -ImagePath $Iso | Out-Null
 
@@ -194,7 +183,7 @@ if (-not $state.PSObject.Properties['DiskReady']) {
     & bcdboot.exe "${W}:\Windows" /s "${S}:" /f UEFI | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed ($LASTEXITCODE)" 'שגיאה בהכנת הדיסק לאתחול.' }
 
-    # first-boot answers: computer name, time zone, Hebrew keyboard, Administrator password, skip all screens
+    # first-boot answers: name, time zone, Hebrew keyboard, Administrator password, skip all screens
     $unattend = @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -227,134 +216,105 @@ if (-not $state.PSObject.Properties['DiskReady']) {
     New-Item -ItemType Directory -Path "${W}:\Windows\Panther" -Force | Out-Null
     Set-Content -Path "${W}:\Windows\Panther\unattend.xml" -Value $unattend -Encoding UTF8
 
-    # turn the system partition into a real EFI partition and hide it
+    # SharedPC files + first-boot script (runs automatically as SYSTEM at the end of Windows setup)
+    Log 'Copying the newest SharedPC files from GitHub into the virtual disk...'
+    $gi = "${W}:\SharedPC-Install"
+    New-Item -ItemType Directory -Path $gi -Force | Out-Null
+    foreach ($f in 'setup.ps1', 'portal.ps1', 'update.ps1', 'version.txt', 'files.txt', 'install.bat', 'firstboot.ps1', 'tslogin.ps1') {
+        if (-not (Download "$RepoRaw/$f" (Join-Path $gi $f))) { Fail "Could not download $f from GitHub" 'לא הצלחתי להוריד את קבצי המערכת מ-GitHub.' }
+    }
+    @{ InviteCode = [string]$state.InviteCode } | ConvertTo-Json | Set-Content (Join-Path $gi 'firstboot.json') -Encoding ASCII
+    New-Item -ItemType Directory -Path "${W}:\Windows\Setup\Scripts" -Force | Out-Null
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SharedPC-Install\firstboot.ps1`r`n" |
+        Set-Content "${W}:\Windows\Setup\Scripts\SetupComplete.cmd" -Encoding ASCII
+
+    # make the system partition a real (hidden) EFI partition
     Remove-PartitionAccessPath -DiskNumber $n -PartitionNumber $sys.PartitionNumber -AccessPath "${S}:\"
     Set-Partition -DiskNumber $n -PartitionNumber $sys.PartitionNumber -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
-    Dismount-VHD -Path $Vhd
+    Dismount-DiskImage -ImagePath $Vhd | Out-Null
     Set-StateValue $state 'DiskReady' $true
     Log 'Virtual disk ready'
 } else { Log 'Virtual disk already built' }
 
 # ---------- 5. create and start the VM ----------
-if (-not (Get-VM -Name $VMName -ErrorAction SilentlyContinue)) {
-    $switch = Get-VMSwitch -Name 'Default Switch' -ErrorAction SilentlyContinue
-    if (-not $switch) { Fail 'Hyper-V Default Switch not found' 'לא נמצא החיבור "Default Switch" של Hyper-V.' }
-    $memGB = if ($ramGB -ge 16) { 8 } elseif ($ramGB -ge 12) { 6 } else { 4 }
-    $cpus  = [math]::Max(2, [math]::Min(4, [int]($cpu.NumberOfLogicalProcessors / 2)))
-    Log "Creating VM '$VMName' with ${memGB}GB RAM and $cpus processors..."
-    New-VM -Name $VMName -Generation 2 -MemoryStartupBytes ([int64]$memGB * 1GB) -VHDPath $Vhd -SwitchName 'Default Switch' | Out-Null
-    Set-VMProcessor -VMName $VMName -Count $cpus
-    Set-VMMemory    -VMName $VMName -DynamicMemoryEnabled $false
-    Set-VM -Name $VMName -AutomaticStartAction Start -AutomaticStartDelay 0 -AutomaticStopAction Save `
-           -AutomaticCheckpointsEnabled $false -CheckpointType Standard
-    Enable-VMIntegrationService -VMName $VMName -Name 'Guest Service Interface' -ErrorAction SilentlyContinue
+$vmList = (& $script:VBM list vms) -join "`n"
+if ($vmList -notmatch "`"$VMName`"") {
+    $memMB = if ($ramGB -ge 24) { 12288 } elseif ($ramGB -ge 16) { 8192 } elseif ($ramGB -ge 12) { 6144 } else { 4096 }
+    $cpus  = [math]::Max(2, [math]::Min(6, [int]($cpu.NumberOfLogicalProcessors / 2)))
+    Log "Creating VirtualBox VM '$VMName' with $([int]($memMB/1024))GB RAM and $cpus processors..."
+    VBox createvm --name $VMName --ostype Windows2022_64 --register
+    VBox modifyvm $VMName --firmware efi --memory $memMB --cpus $cpus --ioapic on --vram 128 --graphicscontroller vboxsvga --nic1 nat --nictype1 82540EM
+    VBox modifyvm $VMName --natpf1 "portal,tcp,127.0.0.1,$PortalPort,,8080"
+    VBox modifyvm $VMName --natpf1 "rdp,tcp,127.0.0.1,$RdpPort,,3389"
+    VBox storagectl $VMName --name SATA --add sata --controller IntelAhci --portcount 1 --hostiocache on
+    VBox storageattach $VMName --storagectl SATA --port 0 --device 0 --type hdd --medium $Vhd
 }
-if ((Get-VM -Name $VMName).State -ne 'Running') { Log 'Starting VM...'; Start-VM -Name $VMName }
 
-$cred = New-Object PSCredential('Administrator', (ConvertTo-SecureString $AdminPw -AsPlainText -Force))
-Log 'Waiting for Windows inside the VM to finish first boot (5-15 minutes)...'
-$deadline = (Get-Date).AddMinutes(40); $ready = $false
+# a task that starts the VM in the background every time you log in to this computer (also used right now)
+$me2 = "$env:USERDOMAIN\$env:USERNAME"
+$act = New-ScheduledTaskAction -Execute $script:VBM -Argument "startvm $VMName --type headless"
+$trg = New-ScheduledTaskTrigger -AtLogOn -User $me2
+$trg.Delay = 'PT30S'
+$prn = New-ScheduledTaskPrincipal -UserId $me2 -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName $StartTask -Action $act -Trigger $trg -Principal $prn -Force | Out-Null
+
+$running = (& $script:VBM list runningvms) -join "`n"
+if ($running -notmatch "`"$VMName`"") { Log 'Starting the VM in the background...'; VBox startvm $VMName --type headless }
+
+# ---------- 6. wait for Windows + SharedPC inside the VM ----------
+Log 'Waiting for Windows inside the VM to finish its first start and install SharedPC (10-25 minutes)...'
+$deadline = (Get-Date).AddMinutes(50); $st = $null
 while ((Get-Date) -lt $deadline) {
-    try { Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null; $ready = $true; break }
-    catch { Start-Sleep -Seconds 20 }
+    $st = Get-SetupStatus
+    if ($st -and $st.firstbootDone) { break }
+    Start-Sleep -Seconds 20
 }
-if (-not $ready) { Fail 'VM did not become reachable within 40 minutes' 'Windows בתוך המכונה לא עלה בזמן. אפשר להריץ שוב את ההתקנה, היא תמשיך מאותה נקודה.' }
-Log 'Windows inside the VM is up'
-
-# ---------- 6. install the SharedPC portal inside the VM ----------
-$s = New-PSSession -VMName $VMName -Credential $cred
-if (-not $state.PSObject.Properties['GuestReady']) {
-    Log 'Downloading the newest SharedPC files from GitHub...'
-    $gdir = Join-Path $HostDir 'guest'
-    New-Item -ItemType Directory -Path $gdir -Force | Out-Null
-    foreach ($f in 'setup.ps1', 'portal.ps1', 'update.ps1', 'version.txt', 'files.txt', 'install.bat') {
-        & curl.exe -L --fail -s -o (Join-Path $gdir $f) "$RepoRaw/$f"
-        if ($LASTEXITCODE -ne 0) { Fail "Could not download $f from GitHub" 'לא הצלחתי להוריד את קבצי המערכת מ-GitHub.' }
-    }
-    Invoke-Command -Session $s -ScriptBlock { New-Item -ItemType Directory -Path 'C:\SharedPC-Install' -Force | Out-Null }
-    Copy-Item -Path (Join-Path $gdir '*') -Destination 'C:\SharedPC-Install' -ToSession $s -Force
-
-    Log 'Running SharedPC setup inside the VM...'
-    $out = Invoke-Command -Session $s -ArgumentList ([string]$state.InviteCode) -ScriptBlock {
-        param($code)
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\SharedPC-Install\setup.ps1' -Unattended -InviteCode $code 2>&1 | Out-String
-    }
-    Add-Content -Path (Join-Path $HostDir 'install.log') -Value $out -Encoding UTF8
-    $ok = Invoke-Command -Session $s -ScriptBlock {
-        try { (Invoke-WebRequest 'http://localhost:8080/' -UseBasicParsing -TimeoutSec 15).StatusCode -eq 200 } catch { $false }
-    }
-    if (-not $ok) { Fail 'Portal inside the VM is not answering' 'הפורטל בתוך המכונה לא עונה. הפרטים ב-C:\SharedPC-Host\install.log' }
-    Set-StateValue $state 'GuestReady' $true
-    Log 'SharedPC portal is running inside the VM'
-} else { Log 'SharedPC already installed inside the VM' }
-
-# ---------- 7. Tailscale inside the VM (access from anywhere) ----------
-$tsIp = Invoke-Command -Session $s -ScriptBlock {
-    $exe = 'C:\Program Files\Tailscale\tailscale.exe'
-    if (Test-Path $exe) { (& $exe ip -4 2>$null | Select-Object -First 1) } else { $null }
+if (-not ($st -and $st.firstbootDone)) {
+    Fail 'SharedPC inside the VM did not respond within 50 minutes' 'המחשב המשותף לא סיים לעלות בזמן. אפשר להריץ שוב את ההתקנה, היא ממשיכה מאותה נקודה.'
 }
+Log "SharedPC portal is running inside the VM (version $($st.version))"
+
+# ---------- 7. Tailscale login (so your friend can connect from anywhere) ----------
+$tsIp = $st.tailscaleIp
 if (-not $tsIp) {
-    Log 'Installing Tailscale inside the VM...'
-    Invoke-Command -Session $s -ScriptBlock {
-        $exe = 'C:\Program Files\Tailscale\tailscale.exe'
-        if (-not (Test-Path $exe)) {
-            $msi = Join-Path $env:TEMP 'tailscale.msi'
-            & curl.exe -L --fail -s -o $msi 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi'
-            Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn TS_UNATTENDEDMODE=always" -Wait
-            Start-Sleep -Seconds 10
-        }
-    }
-    $url = Invoke-Command -Session $s -ScriptBlock {
-        $exe = 'C:\Program Files\Tailscale\tailscale.exe'
-        $o = 'C:\SharedPC\tailscale-up.txt'
-        Start-Process $exe -ArgumentList 'up', '--unattended', '--hostname=sharedpc' -WindowStyle Hidden `
-            -RedirectStandardError $o -RedirectStandardOutput "$o.out"
-        for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 2
-            $txt = (Get-Content $o, "$o.out" -Raw -ErrorAction SilentlyContinue) -join ' '
-            if ($txt -match '(https://login\.tailscale\.com/\S+)') { return $Matches[1] }
-            if (& $exe ip -4 2>$null) { return 'already' }
-        }
-        return $null
-    }
-    if ($url -and $url -ne 'already') {
-        Log 'WAITING FOR YOU: log in to Tailscale in the browser window that just opened'
-        Start-Process $url
-        Popup "נפתח דף התחברות של Tailscale בדפדפן.`n`nהתחבר עם החשבון שלך (למשל Google) ואשר את המחשב 'sharedpc'.`nההתקנה תמשיך לבד ברגע שתסיים." | Out-Null
-    }
-    $deadline = (Get-Date).AddMinutes(15)
+    $opened = $false
+    $deadline = (Get-Date).AddMinutes(30)
     while (-not $tsIp -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 5
-        $tsIp = Invoke-Command -Session $s -ScriptBlock { & 'C:\Program Files\Tailscale\tailscale.exe' ip -4 2>$null | Select-Object -First 1 }
+        $st = Get-SetupStatus
+        if ($st) {
+            $tsIp = $st.tailscaleIp
+            if (-not $tsIp -and $st.loginUrl -and -not $opened) {
+                Log 'WAITING FOR YOU: log in to Tailscale in the browser window that just opened'
+                Start-Process $st.loginUrl
+                $opened = $true
+                Popup "נפתח דף התחברות של Tailscale בדפדפן.`n`nהתחבר עם החשבון שלך (למשל Google) ואשר את המחשב 'sharedpc'.`nההתקנה תמשיך לבד ברגע שתסיים." | Out-Null
+            }
+        }
+        if (-not $tsIp) { Start-Sleep -Seconds 5 }
     }
-    if ($tsIp) { Log "Tailscale connected: $tsIp" } else { Log 'Tailscale login not completed - the portal still works from this computer' }
-} else { Log "Tailscale already connected: $tsIp" }
-Remove-PSSession $s
+}
+if ($tsIp) { Log "Tailscale connected: $tsIp" } else { Log 'Tailscale login not completed yet - the portal works from this computer; run the installer again later to finish Tailscale' }
 
 # ---------- 8. done ----------
-$lanIp = (Get-VMNetworkAdapter -VMName $VMName).IPAddresses | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
-$portal = if ($tsIp) { "http://${tsIp}:8080" } else { "http://${lanIp}:8080" }
-
 @"
 SharedPC - פרטים חשובים (שמור את הקובץ הזה)
 =============================================
-פורטל (מכל מקום, דרך Tailscale):  $(if ($tsIp) { "http://${tsIp}:8080" } else { 'עוד לא מחובר ל-Tailscale' })
-פורטל (רק מהמחשב הזה):            http://${lanIp}:8080
+פורטל מהמחשב הזה:                http://localhost:$PortalPort
+פורטל לחבר (דרך Tailscale):       $(if ($tsIp) { "http://${tsIp}:8080" } else { 'עוד לא מחובר ל-Tailscale' })
 קוד הזמנה ליצירת משתמשים:          $($state.InviteCode)
 
 משתמש מנהל של המחשב המשותף (לתחזוקה בלבד):
   שם משתמש: Administrator
   סיסמה:     $AdminPw
 
-ניהול המכונה: Hyper-V Manager ← SharedPC
+המחשב המשותף עולה לבד בכל פעם שאתה מתחבר ל-Windows.
+ניהול: תוכנת VirtualBox ← SharedPC
 "@ | Set-Content $SecretFile -Encoding UTF8
 
-Log "ALL DONE. Portal: $portal  |  Invite code and passwords saved in $SecretFile"
+Log "ALL DONE. Portal: http://localhost:$PortalPort  |  Friend: $(if ($tsIp) { "http://${tsIp}:8080" } else { 'n/a' })  |  details in $SecretFile"
 
-if ($true) {
-    $ans = Popup "כדי שהמחשב המשותף יהיה זמין כל הזמן, המחשב הזה לא צריך להיכנס למצב שינה כשהוא מחובר לחשמל.`n`nלבטל מצב שינה (בחיבור לחשמל)?" 'YesNo'
-    if ($ans -eq 'Yes') { & powercfg.exe /change standby-timeout-ac 0; & powercfg.exe /change hibernate-timeout-ac 0; Log 'Sleep on AC power disabled' }
-}
-Start-Process $portal
+$ans = Popup "כדי שהמחשב המשותף יהיה זמין כל הזמן, המחשב הזה לא צריך להיכנס למצב שינה כשהוא מחובר לחשמל.`n`nלבטל מצב שינה (בחיבור לחשמל)?" 'YesNo'
+if ($ans -eq 'Yes') { & powercfg.exe /change standby-timeout-ac 0; & powercfg.exe /change hibernate-timeout-ac 0; Log 'Sleep on AC power disabled' }
+Start-Process "http://localhost:$PortalPort"
 Start-Process notepad.exe $SecretFile
-Popup "הכל מוכן! 🎉`n`nהפורטל נפתח בדפדפן: $portal`nקוד ההזמנה והסיסמאות נשמרו בקובץ שנפתח עכשיו.`n`nשלח לחבר את כתובת הפורטל ואת קוד ההזמנה." | Out-Null
+Popup "הכל מוכן! 🎉`n`nהפורטל נפתח בדפדפן.`nקוד ההזמנה והסיסמאות נשמרו בקובץ שנפתח עכשיו." | Out-Null

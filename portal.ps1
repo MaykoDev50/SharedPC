@@ -241,7 +241,8 @@ function Handle($ctx) {
             }
             $hostName = $req.Url.Host
             $rdp = @(
-                "full address:s:$hostName",
+                # when opened through the VirtualBox port-forward on the host (18080), RDP is on 13389
+                $(if ($req.Url.Port -eq 18080) { "full address:s:${hostName}:13389" } else { "full address:s:$hostName" }),
                 "username:s:$env:COMPUTERNAME\$u",
                 'screen mode id:i:2', 'use multimon:i:0', 'session bpp:i:32',
                 'dynamic resolution:i:1', 'smart sizing:i:1',
@@ -249,6 +250,22 @@ function Handle($ctx) {
                 'autoreconnection enabled:i:1', 'authentication level:i:2', 'prompt for credentials:i:0'
             ) -join "`r`n"
             Send $ctx 200 $rdp 'application/x-rdp' @{ 'Content-Disposition' = "attachment; filename=`"SharedPC-$u.rdp`"" }
+            return
+        }
+
+        '/setup-status' {
+            # only for the host computer (VirtualBox NAT address) - used by the automatic installer
+            $from = $req.RemoteEndPoint.Address.ToString()
+            if ($from -notin @('10.0.2.2', '127.0.0.1', '::1')) { Send $ctx 404 'not found' 'text/plain'; return }
+            $ts   = 'C:\Program Files\Tailscale\tailscale.exe'
+            $tsIp = if (Test-Path $ts) { & $ts ip -4 2>$null | Select-Object -First 1 } else { $null }
+            $status = [ordered]@{
+                firstbootDone = (Test-Path 'C:\SharedPC\firstboot-done.txt')
+                tailscaleIp   = $tsIp
+                loginUrl      = (Get-Content 'C:\SharedPC\tailscale-login.txt' -ErrorAction SilentlyContinue | Select-Object -First 1)
+                version       = (Get-LocalVersion)
+            }
+            Send $ctx 200 ($status | ConvertTo-Json) 'application/json; charset=utf-8'
             return
         }
 
