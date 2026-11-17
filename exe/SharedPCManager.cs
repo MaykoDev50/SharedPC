@@ -18,7 +18,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("2.0.1.0")]
+[assembly: AssemblyVersion("2.0.2.0")]
 
 namespace SharedPC
 {
@@ -32,6 +32,7 @@ namespace SharedPC
         const string Repo = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/manager/";
         static readonly string[] Scripts = { "common.ps1", "create-vm.ps1", "setup-client.ps1" };
         public const string Title = "ניהול מחשבים וירטואליים";
+        public const string Version = "2.0.2";
 
         public static readonly Color Bg = Color.FromArgb(15, 23, 42), Card = Color.FromArgb(30, 41, 59), Fg = Color.FromArgb(226, 232, 240),
             Muted = Color.FromArgb(148, 163, 184), Blue = Color.FromArgb(37, 99, 235), Red = Color.FromArgb(153, 27, 27), Green = Color.FromArgb(22, 101, 52);
@@ -43,10 +44,18 @@ namespace SharedPC
             Application.SetCompatibleTextRenderingDefault(false);
             Application.ThreadException += (s, e) => Error(e.Exception);
             AppDomain.CurrentDomain.UnhandledException += (s, e) => Error(e.ExceptionObject as Exception);
+            // creating virtual disks needs administrator rights: restart elevated if needed
+            var me = new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent());
+            if (!me.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+            {
+                try { Process.Start(new ProcessStartInfo(Application.ExecutablePath) { UseShellExecute = true, Verb = "runas" }); }
+                catch { Say("התוכנה צריכה הרשאות מנהל כדי ליצור מחשבים.\nפתח אותה שוב ולחץ \"כן\" בחלון ההרשאות."); }
+                return;
+            }
             try
             {
                 Directory.CreateDirectory(ScriptDir);
-                Log("Manager started");
+                Log("Manager " + Version + " started (admin)");
                 if (!File.Exists(VBM)) { Say("VirtualBox לא מותקן במחשב הזה.\nצריך להריץ קודם את ההתקנה הראשונית (Install-SharedPC)."); return; }
                 if (!File.Exists(Iso)) { Say("לא נמצא קובץ Windows Server ב-" + Iso + "\nצריך להריץ קודם את ההתקנה הראשונית (Install-SharedPC)."); return; }
                 UpdateScripts();
@@ -239,7 +248,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
         public MainForm()
         {
             UI.Dark(this);
-            Text = App.Title; Size = new Size(1080, 680); MinimumSize = new Size(900, 520);
+            Text = App.Title + "  ·  גרסה " + App.Version; Size = new Size(1080, 680); MinimumSize = new Size(900, 520);
 
             var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 110, FlowDirection = FlowDirection.TopDown, Padding = new Padding(16, 10, 16, 0), WrapContents = false };
             top.Controls.Add(UI.Lbl("🖥️  " + App.Title, 18, true, App.Fg));
