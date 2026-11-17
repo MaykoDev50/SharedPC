@@ -241,15 +241,132 @@ function Invoke-QuickLogin($f) {
     return $null
 }
 
+
+# ================= host-only administration (used by the SharedPC app on the host computer) =================
+function Test-FromHost($req) { $req.RemoteEndPoint.Address.ToString() -in @('10.0.2.2', '127.0.0.1', '::1') }
+
+function Send-Json($ctx, $obj, [int]$code = 200) { Send $ctx $code ($obj | ConvertTo-Json -Depth 5) 'application/json; charset=utf-8' }
+
+function Get-QuotaMap {
+    $m = @{}
+    foreach ($q in @(Get-CimInstance Win32_DiskQuota -ErrorAction SilentlyContinue)) {
+        if ($q.QuotaVolume.DeviceID -ne 'C:') { continue }
+        if ($q.User.Name) { $m[$q.User.Name.ToLowerInvariant()] = $q }
+    }
+    $m
+}
+
+function Set-UserQuota([string]$u, [double]$gb) {
+    $ErrorActionPreference = 'Continue'
+    if ($gb -le 0) { $lim = '18446744073709551615'; $warn = $lim }      # no limit
+    else { $lim = [string][uint64]($gb * 1GB); $warn = [string][uint64]($gb * 1GB * 0.9) }
+    $out = & fsutil.exe quota modify C: $warn $lim "$env:COMPUTERNAME\$u" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "fsutil: $($out.Trim())" }
+}
+
+function Get-AdminUsers {
+    $ErrorActionPreference = 'Continue'
+    $sessions = @(Get-Sessions)
+    $qm = Get-QuotaMap
+    $admins = @(Get-LocalGroupMember -Group $AdminGroup -ErrorAction SilentlyContinue | ForEach-Object { ($_.Name -split '\\')[-1] })
+    foreach ($u in @(Get-PortalUsers)) {
+        $q = $qm[$u.ToLowerInvariant()]
+        $s = $sessions | Where-Object { $_.User -eq $u } | Select-Object -First 1
+        [ordered]@{
+            name     = $u
+            admin    = [bool]($u -in $admins)
+            usedGB   = $(if ($q) { [math]::Round($q.DiskSpaceUsed / 1GB, 2) } else { 0 })
+            quotaGB  = $(if ($q -and $q.Limit -lt 1e18) { [math]::Round($q.Limit / 1GB, 1) } else { 0 })
+            online   = [bool]($s -and $s.Active)
+            signedIn = [bool]$s
+        }
+    }
+}
+
+function Invoke-Admin([string]$action, $f) {
+    $u = [string]$f['username']
+    if ($u -notmatch '^[A-Za-z0-9._-]{3,20}$') { return 'שם המשתמש חייב להיות באנגלית, 3–20 תווים (אותיות, ספרות, . _ -).' }
+    $exists = [bool](Get-LocalUser -Name $u -ErrorAction SilentlyContinue)
+    if ($action -ne 'create') {
+        if (-not $exists) { return 'המשתמש לא קיים.' }
+        if ($u -notin @(Get-PortalUsers)) { return 'אי אפשר לנהל את המשתמש הזה מכאן.' }
+    }
+    try {
+        switch ($action) {
+            'create' {
+                if ($exists) { return 'שם המשתמש הזה כבר תפוס.' }
+                if (@(Get-PortalUsers).Count -ge $MaxUsers) { return "הגעת למספר המשתמשים המרבי ($MaxUsers)." }
+                $bad = Test-Password ([string]$f['password']) $u; if ($bad) { return $bad }
+                $sec = ConvertTo-SecureString ([string]$f['password']) -AsPlainText -Force
+                New-LocalUser -Name $u -Password $sec -FullName $u -PasswordNeverExpires -AccountNeverExpires -Description 'Created by SharedPC admin' | Out-Null
+                Add-LocalGroupMember -Group $RduGroup    -Member $u
+                Add-LocalGroupMember -Group $PortalGroup -Member $u
+                if ($f['admin'] -eq '1') { Add-LocalGroupMember -Group $AdminGroup -Member $u }
+                Set-UserQuota $u ([double]$f['quotaGB'])
+                Write-Log "Admin created user '$u' (quota $($f['quotaGB'])GB, admin $($f['admin']))"
+            }
+            'quota'    { Set-UserQuota $u ([double]$f['quotaGB']); Write-Log "Quota for '$u' set to $($f['quotaGB'])GB" }
+            'password' {
+                $bad = Test-Password ([string]$f['password']) $u; if ($bad) { return $bad }
+                Set-LocalUser -Name $u -Password (ConvertTo-SecureString ([string]$f['password']) -AsPlainText -Force)
+                Write-Log "Password for '$u' changed"
+            }
+            'admin' {
+                if ($f['admin'] -eq '1') { Add-LocalGroupMember -Group $AdminGroup -Member $u -ErrorAction SilentlyContinue }
+                else { Remove-LocalGroupMember -Group $AdminGroup -Member $u -ErrorAction SilentlyContinue }
+            }
+            'delete' {
+                $ErrorActionPreference = 'Continue'
+                foreach ($l in @(& quser.exe $u 2>$null | Select-Object -Skip 1)) {
+                    $id = ($l.TrimStart([char[]]@('>', ' ')) -split '\s+') | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1
+                    if ($id) { & logoff.exe $id 2>$null }
+                }
+                Start-Sleep -Seconds 3
+                $sid = (Get-LocalUser -Name $u).SID.Value
+                Remove-LocalUser -Name $u
+                Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.SID -eq $sid } | Remove-CimInstance -ErrorAction SilentlyContinue
+                Write-Log "User '$u' deleted"
+            }
+            default { return 'פעולה לא מוכרת.' }
+        }
+    } catch { return "Windows לא אישר: $($_.Exception.Message)" }
+    return $null
+}
+
+# check a username/password (so the app can say "wrong password" before opening Remote Desktop)
+function Test-Login($f) {
+    if ((Get-Date) -lt $script:LockUntil) { return 'יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.' }
+    $u = [string]$f['username']
+    if ($u -notmatch '^[A-Za-z0-9._-]{3,20}$' -or $u -notin @(Get-PortalUsers)) { $ok = $false }
+    else {
+        Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+        $pc = New-Object System.DirectoryServices.AccountManagement.PrincipalContext('Machine')
+        $ok = $pc.ValidateCredentials($u, [string]$f['password'])
+        $pc.Dispose()
+    }
+    if (-not $ok) {
+        $script:Fails++
+        if ($script:Fails -ge 8) { $script:LockUntil = (Get-Date).AddMinutes(5); $script:Fails = 0 }
+        return 'שם משתמש או סיסמה לא נכונים.'
+    }
+    $script:Fails = 0
+    return $null
+}
+
 function Handle($ctx) {
     $req  = $ctx.Request
     $path = $req.Url.AbsolutePath.TrimEnd('/')
     if (-not $path) { $path = '/' }
 
-    switch -Exact ($path) {
-        '/' { Send $ctx 200 (Home-Page); return }
+    switch ($path) {
+        '/' {
+            if (Test-FromHost $req) { Send $ctx 200 (Home-Page); return }
+            Send $ctx 200 (Page 'המחשב המשותף' "<h1>🖥️ המחשב המשותף</h1><p class='sub'>המחשב זמין. נכנסים דרך התוכנה <b>SharedPC</b> עם השם והסיסמה שקיבלתם.</p>")
+            return
+        }
 
         '/create' {
+            if (-not (Test-FromHost $req)) { Send $ctx 403 (Page 'אין גישה' '<h1>רק המנהל יכול לעשות את זה</h1>'); return }
             if ($req.HttpMethod -ne 'POST') { $ctx.Response.Redirect('/'); $ctx.Response.Close(); return }
             $f   = Read-Form $req
             $err = New-PortalUser $f
@@ -271,6 +388,7 @@ function Handle($ctx) {
         }
 
         '/rdp' {
+            if (-not (Test-FromHost $req)) { Send $ctx 403 (Page 'אין גישה' '<h1>רק המנהל יכול לעשות את זה</h1>'); return }
             $u = [string]$req.QueryString['user']
             if ($u -notmatch '^[A-Za-z0-9._-]{3,20}$' -or ($u -notin @(Get-PortalUsers))) {
                 Send $ctx 404 (Home-Page "<div class='err'>לא נמצא משתמש בשם הזה.</div>"); return
@@ -289,7 +407,29 @@ function Handle($ctx) {
             return
         }
 
+        '/api/admin/users' {
+            if (-not (Test-FromHost $req)) { Send $ctx 404 'not found' 'text/plain'; return }
+            $d = Get-PSDrive C
+            Send-Json $ctx ([ordered]@{ users = @(Get-AdminUsers); freeGB = [math]::Round($d.Free / 1GB, 1); usedGB = [math]::Round($d.Used / 1GB, 1); maxSessions = 2 })
+            return
+        }
+
+        { $_ -like '/api/admin/*' } {
+            if (-not (Test-FromHost $req) -or $req.HttpMethod -ne 'POST') { Send $ctx 404 'not found' 'text/plain'; return }
+            $err = Invoke-Admin ($path -replace '^/api/admin/', '') (Read-Form $req)
+            if ($err) { Send-Json $ctx @{ ok = $false; error = $err } 400 } else { Send-Json $ctx @{ ok = $true } }
+            return
+        }
+
+        '/api/login-check' {
+            if ($req.HttpMethod -ne 'POST') { Send $ctx 405 'POST only' 'text/plain'; return }
+            $err = Test-Login (Read-Form $req)
+            if ($err) { Send-Json $ctx @{ ok = $false; error = $err } 401 } else { Send-Json $ctx @{ ok = $true } }
+            return
+        }
+
         '/api/quick' {
+            if (-not (Test-FromHost $req)) { Send $ctx 403 (Page 'אין גישה' '<h1>רק המנהל יכול לעשות את זה</h1>'); return }
             if ($req.HttpMethod -ne 'POST') { Send $ctx 405 '{"ok":false}' 'application/json'; return }
             $err = Invoke-QuickLogin (Read-Form $req)
             $res = if ($err) { @{ ok = $false; error = $err } } else { @{ ok = $true } }
@@ -333,6 +473,7 @@ function Handle($ctx) {
 }
 
 # ---------- הפעלה ----------
+& fsutil.exe quota enforce C: 2>&1 | Out-Null   # per-user storage limits
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://+:$Port/")
 $listener.Start()

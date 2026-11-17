@@ -65,6 +65,9 @@ Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue |
     Where-Object { ($_.UserName -split '\\')[-1] -in $names } |
     Stop-Process -Force -ErrorAction SilentlyContinue
 
+# per-user storage limits (set from the host's "Manage users")
+& fsutil.exe quota enforce C: 2>&1 | Out-Null
+
 # 5. Google Chrome for everyone (one installation, Downloads go to the shared folder)
 $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 if (-not (Test-Path $chrome)) {
