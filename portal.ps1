@@ -443,7 +443,7 @@ function Handle($ctx) {
             if ($from -notin @('10.0.2.2', '127.0.0.1', '::1')) { Send $ctx 404 'not found' 'text/plain'; return }
             $ts   = 'C:\Program Files\Tailscale\tailscale.exe'
             $tsIp = $null
-            if (Test-Path $ts) { try { $tsIp = & $ts ip -4 2>$null | Select-Object -First 1 } catch {} }
+            if (Test-Path $ts) { $ErrorActionPreference = 'Continue'; $tsIp = & $ts ip -4 2>$null | Where-Object { $_ -match '^100\.' } | Select-Object -First 1; $ErrorActionPreference = 'Stop' }
             $status = [ordered]@{
                 firstbootDone = (Test-Path 'C:\SharedPC\firstboot-done.txt')
                 tailscaleIp   = $tsIp
