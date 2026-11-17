@@ -85,6 +85,7 @@ $ramGB  = [math]::Round($cs.TotalPhysicalMemory / 1GB)
 $freeGB = [math]::Round((Get-PSDrive C).Free / 1GB)
 Log "Computer: $($os.Caption) (build $($os.BuildNumber)), RAM ${ramGB}GB, free on C: ${freeGB}GB, CPU: $($cpu.Name.Trim()), threads: $($cpu.NumberOfLogicalProcessors)"
 Log "Virtualization in BIOS: $($cpu.VirtualizationFirmwareEnabled), Windows hypervisor running: $($cs.HypervisorPresent)"
+Log "PowerShell $($PSVersionTable.PSVersion), 64-bit process: $([Environment]::Is64BitProcess)"
 if ($ramGB -lt 7) { Fail "Only ${ramGB}GB RAM" 'צריך לפחות 8GB זיכרון במחשב.' }
 if (-not (Test-Path $Vhd) -and $freeGB -lt 35) { Fail "Only ${freeGB}GB free on C:" 'צריך לפחות 35GB פנויים בכונן C.' }
 if (-not $cpu.VirtualizationFirmwareEnabled -and -not $cs.HypervisorPresent) {
@@ -158,6 +159,7 @@ $AdminPw = [string]$state.AdminPassword
 if (-not (Has $state 'DiskReady')) {
     try { & $script:VBM unregistervm $VMName 2>$null | Out-Null } catch {}
     try { & $script:VBM closemedium disk $Vhd 2>$null | Out-Null } catch {}
+    Dismount-DiskImage -ImagePath $Iso -ErrorAction SilentlyContinue | Out-Null   # left mounted by an earlier failed run
     if (Test-Path $Vhd) { Dismount-DiskImage -ImagePath $Vhd -ErrorAction SilentlyContinue | Out-Null; Remove-Item $Vhd -Force }
 
     Log 'Creating virtual disk (127GB max, grows as needed)...'
@@ -187,8 +189,18 @@ if (-not (Has $state 'DiskReady')) {
     Dismount-DiskImage -ImagePath $Iso | Out-Null
 
     Log 'Making the disk bootable...'
-    & bcdboot.exe "${W}:\Windows" /s "${S}:" /f UEFI | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed ($LASTEXITCODE)" 'שגיאה בהכנת הדיסק לאתחול.' }
+    # try this computer's bcdboot first, then the one inside the new Windows image
+    $sysDir = if ([Environment]::Is64BitProcess) { "$env:SystemRoot\System32" } else { "$env:SystemRoot\Sysnative" }
+    $booted = $false
+    foreach ($b in "$sysDir\bcdboot.exe", "${W}:\Windows\System32\bcdboot.exe") {
+        $ErrorActionPreference = 'Continue'
+        $bo = & $b "${W}:\Windows" /s "${S}:" /f UEFI 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        Log "bcdboot ($b) exit $code : $($bo.Trim())"
+        if ($code -eq 0 -and (Test-Path "${S}:\EFI\Boot\bootx64.efi")) { $booted = $true; break }
+    }
+    if (-not $booted) { Fail 'bcdboot failed (see log above)' 'שגיאה בהכנת הדיסק לאתחול.' }
 
     # first-boot answers: name, time zone, Hebrew keyboard, Administrator password, skip all screens
     $unattend = @"
