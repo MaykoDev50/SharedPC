@@ -2,12 +2,17 @@
 # Turns the VM into a shared computer: 2 people connected at once, each with their own desktop,
 # shared files and programs, plus a web portal for creating users.
 
+param(
+    [switch]$Unattended,      # no questions (used by the automatic host installer)
+    [string]$InviteCode = '',
+    [switch]$NoAdmins
+)
 $ErrorActionPreference = 'Stop'
 
 # --- relaunch as Administrator if needed ---
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $($MyInvocation.UnboundArguments -join ' ')"
     exit
 }
 
@@ -20,7 +25,7 @@ function Step([string]$t) { Write-Host "`n==> $t" -ForegroundColor Cyan }
 # --- sanity check: Windows client editions allow only ONE remote user at a time ---
 $os = Get-CimInstance Win32_OperatingSystem
 Write-Host "System: $($os.Caption)" -ForegroundColor Gray
-if ($os.ProductType -eq 1) {
+if ($os.ProductType -eq 1 -and -not $Unattended) {
     Write-Warning 'This is a regular Windows (10/11) edition: only ONE person can be connected at a time.'
     Write-Warning 'For 2 people at once, install Windows Server 2022 (Desktop Experience) as described in the guide.'
     if ((Read-Host 'Continue anyway? (y/n)') -ne 'y') { exit }
@@ -34,10 +39,15 @@ foreach ($f in 'portal.ps1', 'update.ps1', 'version.txt') { Copy-Item (Join-Path
 
 # --- settings ---
 Step 'Portal settings'
-$invite = Read-Host 'Choose an INVITE CODE (needed to create users). Press Enter for a random one'
+if ($Unattended) {
+    $invite     = $InviteCode
+    $makeAdmins = -not $NoAdmins
+} else {
+    $invite   = Read-Host 'Choose an INVITE CODE (needed to create users). Press Enter for a random one'
+    $adminAns = Read-Host 'Should new users be administrators (able to install programs)? [Y/n]'
+    $makeAdmins = ($adminAns -notmatch '^[nN]')
+}
 if (-not $invite) { $invite = -join ((48..57) + (65..90) | Get-Random -Count 8 | ForEach-Object { [char]$_ }) }
-$adminAns   = Read-Host 'Should new users be administrators (able to install programs)? [Y/n]'
-$makeAdmins = ($adminAns -notmatch '^[nN]')
 
 [ordered]@{ Port = $Port; InviteCode = $invite; MaxUsers = 5; MakeAdmins = $makeAdmins;
            UpdateRepo = 'MaykoDev50/SharedPC'; UpdateBranch = 'main' } |
@@ -130,4 +140,4 @@ Write-Host "Shared folder:                          $Shared  (shortcut 'Shared' 
 Write-Host "Settings / log:                         $Root\config.json  /  $Root\portal.log"
 Write-Host 'Updates:                                automatic (daily 04:00 + every startup)'
 Write-Host '======================================'
-Read-Host "`nPress Enter to close"
+if (-not $Unattended) { Read-Host "`nPress Enter to close" }
