@@ -144,7 +144,11 @@ $script:target = $null
 function Refresh-Target {
     $status.Text = 'מחפש את המחשב המשותף…'; $form.Refresh()
     $script:target = Find-Target
-    if ($script:target) { $status.Text = '✅ המחשב המשותף זמין'; $status.ForeColor = [Drawing.Color]::FromArgb(134, 239, 172) }
+    if ($script:target) {
+        $status.Text = '✅ המחשב המשותף זמין'; $status.ForeColor = [Drawing.Color]::FromArgb(134, 239, 172)
+        # ask the shared computer to check for updates (so new features arrive without downloading anything)
+        try { Invoke-WebRequest "$($script:target.portal)/update" -Method Post -UseBasicParsing -TimeoutSec 3 | Out-Null } catch {}
+    }
     else {
         $status.Text = '❌ לא מוצא את המחשב המשותף. ודא ש-Tailscale מחובר.'
         $status.ForeColor = [Drawing.Color]::FromArgb(252, 165, 165)

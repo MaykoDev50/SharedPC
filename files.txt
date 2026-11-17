@@ -5,3 +5,4 @@ setup.ps1
 install.bat
 firstboot.ps1
 tslogin.ps1
+migrate.ps1
