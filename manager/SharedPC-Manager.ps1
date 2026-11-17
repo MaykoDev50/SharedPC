@@ -118,6 +118,15 @@ $bNew.Add_Click({
     $gb = Input 'כמה GB לקבצים? (Windows עצמו לא נספר)' '50'; if ($gb -notmatch '^\d+$' -or [int]$gb -lt 5) { Say 'מספר שלם, לפחות 5.'; return }
     $ram = Input 'כמה GB זיכרון (RAM)? 4 מספיק לרוב' '4'; if ($ram -notmatch '^\d+$' -or [int]$ram -lt 2) { Say 'מספר שלם, לפחות 2.'; return }
     $adm = Ask "לתת ל-${user} הרשאות מנהל במחשב שלו? (יוכל להתקין תוכנות)"
+    # capacity check: memory and disk of this computer
+    $totalRam = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    $planned  = (@(Get-VmRecords | Where-Object { $_.status -ne 'failed' }) | Measure-Object -Property ramGB -Sum).Sum + [int]$ram
+    $freeDisk = [math]::Round((Get-PSDrive C).Free / 1GB)
+    $needDisk = [int]$gb + 25
+    if ($needDisk -gt $freeDisk) { Say "אין מספיק מקום בכונן C: צריך עד $needDisk GB ויש $freeDisk GB."; return }
+    if ($planned -gt ($totalRam - 6)) {
+        if (-not (Ask "שים לב: כל המחשבים יחד צריכים $planned GB זיכרון, ובמחשב שלך יש $totalRam GB (וגם Windows שלך צריך בערך 6GB).`nאפשר ליצור, אבל לא כולם יוכלו לפעול בו-זמנית. מחשבים שלא נכנסים פשוט לא יעלו עד שתכבה אחרים.`n`nלהמשיך?")) { return }
+    }
 
     $used = @(Get-VmRecords | ForEach-Object { [int]$_.port })
     $port = 3390; while ($port -in $used) { $port++ }
