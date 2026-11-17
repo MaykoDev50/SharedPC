@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Admin")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
 
 namespace SharedPCAdmin
 {
@@ -58,24 +58,32 @@ namespace SharedPCAdmin
                 if (!a.Contains(":")) a += ":8080";
                 return "http://" + a;
             };
+            string working = null;   // the address that answered (on the server's own computer that is 127.0.0.1)
+            Func<string, bool> ping = u =>
+            {
+                try { var r = (HttpWebRequest)WebRequest.Create(u + "/admin"); r.Timeout = 5000; using (r.GetResponse()) { } return true; }
+                catch { return false; }
+            };
             Action check = () =>
             {
                 status.Text = "⏳ בודק חיבור לשרת…"; status.ForeColor = Muted;
                 var u = url();
                 Task.Run(() =>
                 {
-                    try { var r = (HttpWebRequest)WebRequest.Create(u + "/admin"); r.Timeout = 6000; using (r.GetResponse()) { } return true; }
-                    catch { return false; }
+                    if (ping(u)) return Tuple.Create(u, "✅ השרת זמין");
+                    // inside the owner's home the router often can't reach its own public address - try this computer / the home network
+                    if (ping("http://127.0.0.1:8080")) return Tuple.Create("http://127.0.0.1:8080", "✅ השרת זמין (במחשב הזה)");
+                    return Tuple.Create((string)null, "❌ השרת לא עונה (המחשב של המנהל כבוי? הכתובת השתנתה?)");
                 }).ContinueWith(t => f.BeginInvoke((Action)(() =>
                 {
-                    status.Text = t.Result ? "✅ השרת זמין" : "❌ השרת לא עונה (המחשב של המנהל כבוי? הכתובת השתנתה?)";
-                    status.ForeColor = t.Result ? Green : Red;
+                    working = t.Result.Item1; status.Text = t.Result.Item2;
+                    status.ForeColor = working != null ? Green : Red;
                 })));
             };
             open.Click += (s, e) =>
             {
                 try { File.WriteAllText(Cfg, box.Text.Trim()); } catch { }
-                Process.Start(url() + "/admin");
+                Process.Start((working ?? url()) + "/admin");
             };
             box.Leave += (s, e) => check();
             f.Shown += (s, e) => check();
