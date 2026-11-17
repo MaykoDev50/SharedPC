@@ -18,7 +18,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("2.0.4.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
 
 namespace SharedPC
 {
@@ -32,7 +32,7 @@ namespace SharedPC
         const string Repo = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/manager/";
         static readonly string[] Scripts = { "common.ps1", "create-vm.ps1", "setup-client.ps1" };
         public const string Title = "ניהול מחשבים וירטואליים";
-        public const string Version = "2.0.4";
+        public const string Version = "2.1.0";
 
         public static readonly Color Bg = Color.FromArgb(15, 23, 42), Card = Color.FromArgb(30, 41, 59), Fg = Color.FromArgb(226, 232, 240),
             Muted = Color.FromArgb(148, 163, 184), Blue = Color.FromArgb(37, 99, 235), Red = Color.FromArgb(153, 27, 27), Green = Color.FromArgb(22, 101, 52);
@@ -212,6 +212,135 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
         public static int I(Dictionary<string, object> r, string k) { int i; return int.TryParse(S(r, k), out i) ? i : 0; }
     }
 
+    // ---------- opens ports on the home router automatically (UPnP), so people can connect from anywhere ----------
+    static class Router
+    {
+        static string controlUrl, serviceType;
+        public static string Status = "בודק את הראוטר…";
+        public static string ExternalIp = "";
+        public static bool Ok;
+
+        static string Http(string url, string soapAction, string body)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Timeout = 5000; req.ReadWriteTimeout = 5000;
+            if (soapAction != null)
+            {
+                req.Method = "POST"; req.ContentType = "text/xml; charset=\"utf-8\"";
+                req.Headers.Add("SOAPACTION", "\"" + serviceType + "#" + soapAction + "\"");
+                var b = Encoding.UTF8.GetBytes(body); req.ContentLength = b.Length;
+                using (var s = req.GetRequestStream()) s.Write(b, 0, b.Length);
+            }
+            try { using (var r = req.GetResponse()) using (var sr = new StreamReader(r.GetResponseStream())) return sr.ReadToEnd(); }
+            catch (WebException ex)
+            {
+                if (ex.Response == null) throw;
+                using (var sr = new StreamReader(ex.Response.GetResponseStream())) throw new Exception("router: " + sr.ReadToEnd());
+            }
+        }
+        static string Soap(string action, string args)
+        {
+            var body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
+                       "<u:" + action + " xmlns:u=\"" + serviceType + "\">" + args + "</u:" + action + "></s:Body></s:Envelope>";
+            return Http(controlUrl, action, body);
+        }
+        static string Tag(string xml, string tag)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(xml, "<(?:\\w+:)?" + tag + ">([^<]*)</(?:\\w+:)?" + tag + ">");
+            return m.Success ? m.Groups[1].Value.Trim() : "";
+        }
+
+        static bool Discover(string lanIp)
+        {
+            if (controlUrl != null) return true;
+            foreach (var st in new[] { "urn:schemas-upnp-org:device:InternetGatewayDevice:1", "urn:schemas-upnp-org:device:InternetGatewayDevice:2", "upnp:rootdevice" })
+            {
+                var locations = new List<string>();
+                using (var udp = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Parse(lanIp), 0)))
+                {
+                    udp.Client.ReceiveTimeout = 2500;
+                    var msg = Encoding.ASCII.GetBytes("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: " + st + "\r\n\r\n");
+                    var to = new IPEndPoint(IPAddress.Parse("239.255.255.250"), 1900);
+                    udp.Send(msg, msg.Length, to); udp.Send(msg, msg.Length, to);
+                    var end = DateTime.Now.AddSeconds(3);
+                    while (DateTime.Now < end)
+                    {
+                        try
+                        {
+                            var from = new IPEndPoint(IPAddress.Any, 0);
+                            var resp = Encoding.ASCII.GetString(udp.Receive(ref from));
+                            var m = System.Text.RegularExpressions.Regex.Match(resp, "(?im)^location:\\s*(\\S+)");
+                            if (m.Success && !locations.Contains(m.Groups[1].Value)) locations.Add(m.Groups[1].Value);
+                        }
+                        catch (System.Net.Sockets.SocketException) { break; }
+                    }
+                }
+                foreach (var loc in locations)
+                {
+                    try
+                    {
+                        var xml = Http(loc, null, null);
+                        foreach (var svc in new[] { "urn:schemas-upnp-org:service:WANIPConnection:2", "urn:schemas-upnp-org:service:WANIPConnection:1", "urn:schemas-upnp-org:service:WANPPPConnection:1" })
+                        {
+                            var i = xml.IndexOf(svc, StringComparison.OrdinalIgnoreCase); if (i < 0) continue;
+                            var rest = xml.Substring(i);
+                            var cu = Tag(rest, "controlURL"); if (cu == "") continue;
+                            var u = new Uri(loc);
+                            controlUrl = cu.StartsWith("http") ? cu : u.GetLeftPart(UriPartial.Authority) + (cu.StartsWith("/") ? "" : "/") + cu;
+                            serviceType = svc;
+                            App.Log("UPnP router found: " + controlUrl + " (" + svc + ")");
+                            return true;
+                        }
+                    }
+                    catch (Exception ex) { App.Log("UPnP " + loc + ": " + ex.Message); }
+                }
+            }
+            return false;
+        }
+
+        static bool IsPrivate(string ip)
+        {
+            IPAddress a; if (!IPAddress.TryParse(ip, out a)) return true;
+            var b = a.GetAddressBytes();
+            return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 100 && b[1] >= 64 && b[1] <= 127) || b[0] == 127 || b[0] == 0;
+        }
+
+        // make sure every ready computer's port is forwarded to this PC
+        public static void Sync(string lanIp, string publicIp, IEnumerable<int> ports)
+        {
+            try
+            {
+                if (!Discover(lanIp)) { Ok = false; Status = "⚠️ הראוטר לא מאפשר פתיחת פורטים אוטומטית (UPnP כבוי). צריך להעביר פורטים ידנית בראוטר."; return; }
+                try { ExternalIp = Tag(Soap("GetExternalIPAddress", ""), "NewExternalIPAddress"); } catch { ExternalIp = ""; }
+                if (ExternalIp != "" && IsPrivate(ExternalIp))
+                { Ok = false; Status = "❌ ספק האינטרנט שלך לא נותן IP ציבורי אמיתי (CGNAT: " + ExternalIp + "). אי אפשר להתחבר מבחוץ דרך הראוטר."; return; }
+                int done = 0; var errors = new List<string>();
+                foreach (var port in ports.Distinct())
+                {
+                    try
+                    {
+                        Soap("AddPortMapping",
+                            "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + port + "</NewExternalPort><NewProtocol>TCP</NewProtocol>" +
+                            "<NewInternalPort>" + port + "</NewInternalPort><NewInternalClient>" + lanIp + "</NewInternalClient><NewEnabled>1</NewEnabled>" +
+                            "<NewPortMappingDescription>SharedPC " + port + "</NewPortMappingDescription><NewLeaseDuration>0</NewLeaseDuration>");
+                        done++;
+                    }
+                    catch (Exception ex) { errors.Add(port + ": " + ex.Message); App.Log("UPnP map " + port + " failed: " + ex.Message); }
+                }
+                Ok = errors.Count == 0;
+                Status = Ok ? "✅ הפורטים פתוחים בראוטר (" + done + "). אפשר להתחבר מכל מקום עם " + (ExternalIp != "" ? ExternalIp : publicIp) + ":פורט"
+                            : "⚠️ חלק מהפורטים לא נפתחו בראוטר: " + string.Join(", ", errors.Take(3));
+            }
+            catch (Exception ex) { Ok = false; Status = "⚠️ בדיקת הראוטר נכשלה: " + ex.Message; App.Log("UPnP: " + ex); }
+        }
+
+        public static void Remove(string lanIp, int port)
+        {
+            try { if (Discover(lanIp)) Soap("DeletePortMapping", "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + port + "</NewExternalPort><NewProtocol>TCP</NewProtocol>"); }
+            catch (Exception ex) { App.Log("UPnP delete " + port + ": " + ex.Message); }
+        }
+    }
+
     // ---------- UI building blocks ----------
     static class UI
     {
@@ -241,19 +370,23 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
     {
         DataGridView grid = new DataGridView();
         Label info = UI.Lbl("טוען…", 10);
+        Label routerLbl = UI.Lbl("🌐 בודק את הראוטר…", 11, true, Color.FromArgb(253, 224, 71));
+        DateTime lastSync = DateTime.MinValue;
         string publicIp = "…", lanIp = App.LanIp();
         System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10000 };
         bool loading;
+        string lastPorts = null;
 
         public MainForm()
         {
             UI.Dark(this);
             Text = App.Title + "  ·  גרסה " + App.Version; Size = new Size(1080, 680); MinimumSize = new Size(900, 520);
 
-            var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 110, FlowDirection = FlowDirection.TopDown, Padding = new Padding(16, 10, 16, 0), WrapContents = false };
+            var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 140, FlowDirection = FlowDirection.TopDown, Padding = new Padding(16, 10, 16, 0), WrapContents = false };
             top.Controls.Add(UI.Lbl("🖥️  " + App.Title, 18, true, App.Fg));
             info.MaximumSize = new Size(1000, 0);
             top.Controls.Add(info);
+            top.Controls.Add(routerLbl);
 
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
             grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; grid.MultiSelect = false; grid.RowHeadersVisible = false;
@@ -264,7 +397,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             grid.ColumnHeadersDefaultCellStyle.BackColor = App.Bg; grid.ColumnHeadersDefaultCellStyle.ForeColor = App.Muted;
             grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10, FontStyle.Bold);
             grid.AccessibleName = "רשימת המחשבים";
-            foreach (var c in new[] { "שם", "מצב", "שם משתמש", "נפח (GB)", "זיכרון (GB)", "כתובת בבית", "כתובת מבחוץ" }) grid.Columns.Add(c, c);
+            foreach (var c in new[] { "שם", "מצב", "שם משתמש", "נפח (GB)", "זיכרון (GB)", "כתובת (מכל מקום)" }) grid.Columns.Add(c, c);
             grid.Columns[1].FillWeight = 180;
             grid.CellDoubleClick += (s, e) => CopyDetails();
             var gridWrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 6, 16, 6) };
@@ -330,8 +463,12 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                     else if (status == "failed") txt = "❌ נכשל: " + Store.S(r, "step");
                     else txt = state == "running" ? "🟢 פועל" : state == "missing" ? "⚠️ לא נמצא" : "⚪ כבוי";
                     if (state == "running") ramOn += Store.I(r, "ramGB");
-                    rows.Add(new object[] { name, txt, MainForm.CompName(name) + "\\" + Store.S(r, "user"), Store.S(r, "diskGB"), Store.S(r, "ramGB"), lanIp + ":" + Store.S(r, "port"), publicIp + ":" + Store.S(r, "port") });
+                    rows.Add(new object[] { name, txt, MainForm.CompName(name) + "\\" + Store.S(r, "user"), Store.S(r, "diskGB"), Store.S(r, "ramGB"), publicIp + ":" + Store.S(r, "port") });
                 }
+                var readyPorts = recs.Where(r => Store.S(r, "status") == "ready").Select(r => Store.I(r, "port")).Where(p => p > 0).ToList();
+                var key = string.Join(",", readyPorts.OrderBy(p => p));
+                if (publicIp != "…" && (key != lastPorts || (DateTime.Now - lastSync).TotalMinutes > 10))
+                { Router.Sync(lanIp, publicIp, readyPorts); lastPorts = key; lastSync = DateTime.Now; }
                 return Tuple.Create(rows, ramOn);
             }).ContinueWith(t =>
             {
@@ -342,6 +479,8 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                     var sel = grid.SelectedRows.Count > 0 ? grid.SelectedRows[0].Cells[0].Value as string : null;
                     grid.Rows.Clear();
                     foreach (var row in t.Result.Item1) { int i = grid.Rows.Add(row); if ((string)row[0] == sel) grid.Rows[i].Selected = true; }
+                    routerLbl.Text = "🌐 " + Router.Status;
+                    routerLbl.ForeColor = Router.Ok ? Color.FromArgb(134, 239, 172) : Color.FromArgb(253, 224, 71);
                     info.Text = "IP ציבורי: " + publicIp + "     ·     IP ברשת הביתית: " + lanIp + "     ·     פנוי בכונן C: " + App.FreeDiskGB() + " GB     ·     זיכרון של מחשבים פועלים: " + t.Result.Item2 + " מתוך " + App.TotalRamGB() + " GB\n" +
                                 "כדי שיתחברו מחוץ לבית: בראוטר מעבירים כל פורט (המספר אחרי \":\") ל-" + lanIp + ".     דאבל-קליק על מחשב = העתקת פרטי חיבור.";
                 }));
@@ -380,9 +519,9 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
         string Details(Dictionary<string, object> r)
         {
             var name = Store.S(r, "name"); var port = Store.S(r, "port");
-            return "חיבור לשולחן עבודה מרוחק\r\n" +
-                   "כתובת (מתוך הבית): " + lanIp + ":" + port + "\r\n" +
-                   "כתובת (מחוץ לבית): " + publicIp + ":" + port + "\r\n" +
+            var ip = Router.ExternalIp != "" && !Router.ExternalIp.StartsWith("10.") ? Router.ExternalIp : publicIp;
+            return "חיבור לשולחן עבודה מרוחק (mstsc)\r\n" +
+                   "כתובת: " + ip + ":" + port + "\r\n" +
                    "שם משתמש: " + CompName(name) + "\\" + Store.S(r, "user") + "\r\n" +
                    "סיסמה: " + Store.S(r, "password");
         }
@@ -435,6 +574,8 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             App.VBox("unregistervm \"PC-" + n + "\" --delete");
             App.Run("netsh.exe", "advfirewall firewall delete rule name=\"SharedPC PC-" + n + "\"");
             try { Directory.Delete(Path.Combine(App.HostDir, "vms", n), true); } catch (Exception ex) { App.Log("delete dir: " + ex.Message); }
+            var portToFree = Store.I(Rec(n) ?? new Dictionary<string, object>(), "port");
+            if (portToFree > 0) Router.Remove(lanIp, portToFree);
             Store.Remove(n);
             Cursor = Cursors.Default;
             Reload(); App.Say(n + " נמחק.");
