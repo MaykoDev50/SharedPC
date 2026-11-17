@@ -167,5 +167,7 @@ Log "Management channel: $agent"
 try { VBox storageattach $VmName --storagectl SATA --port 1 --device 0 --type dvddrive --medium emptydrive | Out-Null } catch {}
 if (-not $agent) { Start-Sleep -Seconds 60 }
 Update-VmRecord $Name @{ status = 'ready'; step = ''; agent = $agent }
+$opened = Open-RouterPort $Port
+Log "Router port ${Port}: $opened"
 Log "READY. Remote Desktop: <your IP>:$Port  user: $User"
 Start-Sleep -Seconds 3

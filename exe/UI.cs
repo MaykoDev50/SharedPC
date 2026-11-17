@@ -217,7 +217,15 @@ namespace SharedPC
             siteLbl.Margin = new Padding(0, 8, 0, 0);
             var openSite = new Btn("פתח", T.Card, 64, 28); openSite.Font = T.F(9, true); openSite.Click += (s, e) => Process.Start("http://127.0.0.1:" + App.WebPort + "/");
             var copySite = new Btn("העתק", T.Card, 64, 28); copySite.Font = T.F(9, true); copySite.Click += (s, e) => CopyText(SiteUrl());
-            siteRow.Controls.AddRange(new Control[] { siteLbl, copySite, openSite });
+            var remote = new Btn("🛡️ ניהול מרחוק", T.Accent, 140, 28); remote.Font = T.F(9, true);
+            remote.Click += (s, e) =>
+            {
+                var pw = App.AdminPassword();
+                var txt = "פאנל ניהול מרחוק (לך ולשותפים בלבד):\r\n" + SiteUrl() + "/admin\r\nסיסמת ניהול: " + pw;
+                Clipboard.SetText(txt);
+                App.Say(txt + "\n\n✅ הועתק. שלח לשותף יחד עם התוכנה SharedPC-Admin.\nמי שיש לו את הסיסמה הזו יכול ליצור ולמחוק מחשבים – אל תשלח אותה ללקוחות.");
+            };
+            siteRow.Controls.AddRange(new Control[] { siteLbl, copySite, openSite, remote });
             header.Controls.Add(siteRow); header.Controls.Add(routerLbl); header.Controls.Add(chipRow); header.Controls.Add(titleRow);
 
             // ---------- list (right side) ----------

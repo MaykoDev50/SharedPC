@@ -67,7 +67,7 @@ label{display:block;margin:14px 0 6px;color:#8f9bb3;font-size:14px}
 .steps{margin:0;padding-right:20px;line-height:1.9;color:#cbd5e1}
 '@
 function Page([string]$title, [string]$body, [bool]$withLogout = $false) {
-    $logout = if ($withLogout) { "<div class='spacer'></div><form method='post' action='/logout'><button class='ghost small'>יציאה</button></form>" } else { '' }
+    $logout = if ($withLogout) { "<div class='spacer'></div><form method='post' action='$(if ($title -like 'ניהול*') { '/admin/logout' } else { '/logout' })'><button class='ghost small'>יציאה</button></form>" } else { '' }
 @"
 <!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>$title</title><style>$Css</style></head><body><div class="wrap">
@@ -183,6 +183,7 @@ function Check-Password([string]$pw, [string]$user) {
 function Handle($ctx) {
     $req = $ctx.Request; $path = $req.Url.AbsolutePath; $ip = $req.RemoteEndPoint.Address.ToString()
     if ($path -eq '/favicon.ico') { Send $ctx 404 ''; return }
+    if ($path -eq '/admin' -or $path.StartsWith('/admin/')) { Handle-Admin $ctx $req $path $ip; return }
 
     if ($path -eq '/login' -and $req.HttpMethod -eq 'POST') {
         $f = $script:Fails[$ip]
@@ -250,11 +251,200 @@ function Handle($ctx) {
     }
 }
 
+# ======================= remote administration (/admin) =======================
+# For the owner and partners: create / manage all computers from anywhere with the admin password.
+$AdminPwFile = 'C:\SharedPC-Host\admin-password.txt'
+if (-not (Test-Path $AdminPwFile)) { Set-Content $AdminPwFile (New-RandomPassword 5) -Encoding ASCII }
+$script:AdminSessions = @{}
+$script:AdminFails = @{}
+$script:LastRouterSync = [datetime]::MinValue
+
+function Admin-Password { (Get-Content $AdminPwFile -Raw).Trim() }
+function Get-AdminSession($req) {
+    $c = $req.Cookies['spcadm']; if (-not $c) { return $false }
+    $s = $script:AdminSessions[$c.Value]; if (-not $s -or $s -lt (Get-Date)) { return $false }
+    $script:AdminSessions[$c.Value] = (Get-Date).AddHours(4); $true
+}
+function Sync-RouterPorts {
+    if (((Get-Date) - $script:LastRouterSync).TotalMinutes -lt 10) { return }
+    $script:LastRouterSync = Get-Date
+    $ports = @(Get-VmRecords | Where-Object { $_.status -eq 'ready' } | ForEach-Object { [int]$_.port }) + $Port
+    foreach ($p in $ports) { [void](Open-RouterPort $p) }
+}
+
+function Admin-Login([string]$err = '') {
+    $e = if ($err) { "<div class='msg err'>$(Enc $err)</div>" } else { '' }
+    Page 'ניהול · SharedPC' @"
+<div class="login"><div class="card">
+<h1 class="center">🛡️ ניהול</h1><p class="muted center">כניסה למנהלים בלבד</p>
+$e
+<form method="post" action="/admin/login">
+<label>סיסמת ניהול</label><input name="p" type="password" required autofocus autocomplete="current-password">
+<div style="margin-top:18px"><button style="width:100%;justify-content:center">כניסה</button></div>
+</form></div></div>
+"@
+}
+
+function Admin-Page([string]$msg = '', [string]$kind = 'ok') {
+    Sync-RouterPorts
+    $ip = Get-PublicIp
+    $recs = @(Get-VmRecords)
+    $m = if ($msg) { "<div class='msg $kind'>$msg</div>" } else { '' }
+    $rows = foreach ($r in $recs) {
+        $st = if ($r.status -eq 'creating') { "<span class='pill'><span class='dot busy'></span>בהקמה · $(Enc $r.step)</span>" }
+              elseif ($r.status -eq 'failed') { "<span class='pill'><span class='dot' style='background:#ef4444'></span>נכשל</span>" }
+              else { $s = Get-VmState "PC-$($r.name)"; if ($s -eq 'running') { "<span class='pill'><span class='dot on'></span>פועל</span>" } else { "<span class='pill'><span class='dot off'></span>כבוי</span>" } }
+        $n = Enc $r.name
+        $details = Enc ("כתובת: ${ip}:$($r.port)`nשם משתמש: $(CompName $r.name)\$($r.user)`nסיסמה: $($r.password)`n`nאתר לניהול המחשב: http://${ip}:$Port")
+        $agentNote = if (Has-Agent $r) { '' } else { "<div class='hint'>⚠️ נוצר בגרסה ישנה – שינוי נפח/סיסמה לא זמין.</div>" }
+        @"
+<div class="card">
+<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+<div><h2 style="margin:0">🖥️ $n</h2><div class="muted">$(Enc "$(CompName $r.name)\$($r.user)") · ${ip}:$($r.port) · $($r.diskGB) GB · RAM $($r.ramGB) GB</div></div>$st</div>
+<details style="margin-top:12px"><summary class="muted" style="cursor:pointer">פרטי חיבור ללקוח</summary>
+<textarea readonly style="width:100%;height:110px;margin-top:8px;background:#1a2235;color:#ecf0f7;border:1px solid #2d3852;border-radius:10px;padding:10px;font:inherit;direction:rtl">$details</textarea></details>
+<div class="actions" style="margin-top:12px">
+<form method="post" action="/admin/vm"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="start"><button class="green small">▶ הפעל</button></form>
+<form method="post" action="/admin/vm"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="restart"><button class="ghost small">↻ הפעל מחדש</button></form>
+<form method="post" action="/admin/vm"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="stop"><button class="ghost small">⏻ כבה</button></form>
+<form method="post" action="/admin/vm" onsubmit="return confirm('למחוק את $n לגמרי? כל הקבצים שבו יימחקו.')"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="delete"><button class="small" style="background:#991b1b">🗑 מחק</button></form>
+</div>
+<details style="margin-top:12px"><summary class="muted" style="cursor:pointer">⚙️ הגדרות</summary>
+<form method="post" action="/admin/vm" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="gb">
+<div style="flex:1;min-width:140px"><label>נפח (GB)</label><input name="v" type="number" min="5" max="2000" value="$($r.diskGB)"></div><button class="small">שמור נפח</button></form>
+<form method="post" action="/admin/vm" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="password">
+<div style="flex:1;min-width:140px"><label>סיסמה חדשה ללקוח</label><input name="v" value="$(New-RandomPassword)"></div><button class="small">שנה סיסמה</button></form>
+<form method="post" action="/admin/vm" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="ram">
+<div style="flex:1;min-width:140px"><label>זיכרון RAM (GB) – מפעיל מחדש</label><input name="v" type="number" min="2" max="64" value="$($r.ramGB)"></div><button class="small">שמור זיכרון</button></form>
+$agentNote
+</details></div>
+"@
+    }
+    $totalRam = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB)
+    Page 'ניהול · SharedPC' @"
+$m
+<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+<div><h1>🛡️ ניהול מחשבים</h1><div class="muted">$($recs.Count) מחשבים · פנוי בדיסק $freeGb GB · זיכרון במחשב $totalRam GB · IP $ip</div></div>
+<a class="btn" href="/admin">↻ רענון</a></div></div>
+<div class="card"><h2>➕ מחשב חדש</h2>
+<form method="post" action="/admin/create">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">
+<div><label>שם המחשב (באנגלית)</label><input name="name" required pattern="[a-z0-9-]{2,12}" placeholder="dani"></div>
+<div><label>שם משתמש</label><input name="user" required pattern="[A-Za-z0-9._-]{3,20}" placeholder="dani"></div>
+<div><label>סיסמה</label><input name="pw" required value="$(New-RandomPassword)"></div>
+<div><label>נפח לקבצים (GB)</label><input name="gb" type="number" min="5" max="2000" value="50"></div>
+<div><label>זיכרון RAM (GB)</label><input name="ram" type="number" min="2" max="64" value="4"></div>
+<div><label>&nbsp;</label><label style="display:flex;gap:8px;align-items:center;margin:12px 0"><input type="checkbox" name="admin" value="1" style="width:auto"> הרשאות מנהל ללקוח</label></div>
+</div>
+<div style="margin-top:14px"><button>צור מחשב</button></div>
+<div class="hint">ההקמה לוקחת בערך 10–15 דקות. אחר כך פותחים "פרטי חיבור ללקוח" ושולחים לו.</div>
+</form></div>
+$($rows -join "`n")
+"@ $true
+}
+
+function Admin-Action($ctx, $req) {
+    $f = Read-Form $req
+    $name = [string]$f['n']; $a = [string]$f['a']; $v = ([string]$f['v']).Trim()
+    $r = Get-VmRecords | Where-Object { $_.name -eq $name } | Select-Object -First 1
+    if (-not $r) { Send $ctx 200 (Admin-Page 'המחשב לא נמצא.' 'err'); return }
+    $vm = "PC-$name"
+    $ErrorActionPreference = 'Continue'
+    switch ($a) {
+        'start'   { & $script:VBM startvm $vm --type headless 2>&1 | Out-Null; Update-VmRecord $name @{ stopped = $false }; $msg = "$name מופעל." }
+        'stop'    { & $script:VBM controlvm $vm acpipowerbutton 2>&1 | Out-Null; Update-VmRecord $name @{ stopped = $true }; $msg = "$name נכבה." }
+        'restart' { & $script:VBM controlvm $vm reset 2>&1 | Out-Null; $msg = "$name מופעל מחדש." }
+        'delete' {
+            & $script:VBM controlvm $vm poweroff 2>&1 | Out-Null; Start-Sleep -Seconds 3
+            & $script:VBM unregistervm $vm --delete 2>&1 | Out-Null
+            Get-NetFirewallRule -DisplayName "SharedPC $vm" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+            Remove-Item "C:\SharedPC-Host\vms\$name" -Recurse -Force -ErrorAction SilentlyContinue
+            Close-RouterPort ([int]$r.port)
+            Remove-VmRecord $name; $msg = "$name נמחק."
+        }
+        'gb' {
+            if (-not (Has-Agent $r)) { $msg = 'המחשב הזה נוצר בגרסה ישנה – אי אפשר לשנות לו נפח.'; $kind = 'err'; break }
+            if ($v -notmatch '^\d+$' -or [int]$v -lt 5) { $msg = 'נפח לא תקין.'; $kind = 'err'; break }
+            $lim = [uint64]$v * 1GB
+            $o = Guest $r "fsutil quota modify C: $([uint64]($lim * 0.9)) $lim $(CompName $name)\$($r.user)"
+            if ($o -match 'error|denied') { $msg = 'שינוי הנפח נכשל (המחשב דלוק?).'; $kind = 'err' } else { Update-VmRecord $name @{ diskGB = [int]$v }; $msg = "הנפח של $name עודכן ל-$v GB." }
+        }
+        'password' {
+            if (-not (Has-Agent $r)) { $msg = 'המחשב הזה נוצר בגרסה ישנה – אי אפשר לשנות לו סיסמה.'; $kind = 'err'; break }
+            $bad = Check-Password $v $r.user; if ($bad) { $msg = $bad; $kind = 'err'; break }
+            $o = Guest $r "net user $($r.user) $v"
+            if ($o -notmatch 'successfully') { $msg = 'שינוי הסיסמה נכשל (המחשב דלוק?).'; $kind = 'err' } else { Update-VmRecord $name @{ password = $v }; $msg = "הסיסמה של $name שונתה ל: $v" }
+        }
+        'ram' {
+            if ($v -notmatch '^\d+$' -or [int]$v -lt 2) { $msg = 'זיכרון לא תקין.'; $kind = 'err'; break }
+            $was = (Get-VmState $vm) -eq 'running'
+            if ($was) { & $script:VBM controlvm $vm acpipowerbutton 2>&1 | Out-Null; for ($i = 0; $i -lt 30 -and (Get-VmState $vm) -eq 'running'; $i++) { Start-Sleep 2 }; if ((Get-VmState $vm) -eq 'running') { & $script:VBM controlvm $vm poweroff 2>&1 | Out-Null; Start-Sleep 2 } }
+            & $script:VBM modifyvm $vm --memory ([int]$v * 1024) 2>&1 | Out-Null
+            if ($was) { & $script:VBM startvm $vm --type headless 2>&1 | Out-Null }
+            Update-VmRecord $name @{ ramGB = [int]$v }; $msg = "הזיכרון של $name עודכן ל-$v GB."
+        }
+        default { $msg = 'פעולה לא מוכרת.'; $kind = 'err' }
+    }
+    $ErrorActionPreference = 'Stop'
+    Write-Log "admin action '$a' on $name from $($req.RemoteEndPoint.Address)"
+    Send $ctx 200 (Admin-Page (Enc $msg) $(if ($kind) { $kind } else { 'ok' }))
+}
+
+function Admin-Create($ctx, $req) {
+    $f = Read-Form $req
+    $name = ([string]$f['name']).Trim().ToLower(); $user = ([string]$f['user']).Trim(); $pw = ([string]$f['pw']).Trim()
+    $gb = [string]$f['gb']; $ram = [string]$f['ram']; $adm = [string]$f['admin'] -eq '1'
+    $recs = @(Get-VmRecords)
+    $err = if ($name -notmatch '^[a-z0-9-]{2,12}$') { 'שם המחשב: באנגלית, 2–12 תווים.' }
+           elseif ($recs | Where-Object { $_.name -eq $name }) { 'כבר יש מחשב בשם הזה.' }
+           elseif ($user -notmatch '^[A-Za-z0-9._-]{3,20}$') { 'שם משתמש: באנגלית, 3–20 תווים.' }
+           elseif ($gb -notmatch '^\d+$' -or [int]$gb -lt 5) { 'נפח לא תקין.' }
+           elseif ($ram -notmatch '^\d+$' -or [int]$ram -lt 2) { 'זיכרון לא תקין.' }
+           else { Check-Password $pw $user }
+    if ($err) { Send $ctx 400 (Admin-Page (Enc $err) 'err'); return }
+    $port = 3390; $used = @($recs | ForEach-Object { [int]$_.port }); while ($port -in $used) { $port++ }
+    Add-VmRecord ([pscustomobject]@{ name = $name; user = $user; password = $pw; diskGB = [int]$gb; ramGB = [int]$ram; port = $port; admin = $adm; status = 'creating'; step = 'מתחיל'; created = (Get-Date).ToString('s') })
+    $pf = Join-Path ([IO.Path]::GetTempPath()) "spc-$name.json"
+    @{ password = $pw } | ConvertTo-Json | Set-Content $pf -Encoding UTF8
+    $al = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $PSScriptRoot 'create-vm.ps1')`" -Name $name -User $user -PasswordFile `"$pf`" -DiskGB $gb -RamGB $ram -Port $port"
+    if ($adm) { $al += ' -Admin' }
+    Start-Process powershell.exe -ArgumentList $al -WindowStyle Hidden
+    Write-Log "admin created $name (port $port) from $($req.RemoteEndPoint.Address)"
+    Send $ctx 200 (Admin-Page (Enc "המחשב $name בהקמה ⏳ (כ-10–15 דקות). רענן את הדף כדי לראות את ההתקדמות."))
+}
+
+function Handle-Admin($ctx, $req, [string]$path, [string]$ip) {
+    if ($path -eq '/admin/login' -and $req.HttpMethod -eq 'POST') {
+        $f = $script:AdminFails[$ip]
+        if ($f -and $f.count -ge 5 -and $f.until -gt (Get-Date)) { Send $ctx 429 (Admin-Login 'יותר מדי ניסיונות. נסה שוב בעוד 15 דקות.'); return }
+        $form = Read-Form $req
+        if ([string]$form['p'] -cne (Admin-Password)) {
+            if (-not $f -or $f.until -lt (Get-Date)) { $f = @{ count = 0; until = (Get-Date).AddMinutes(15) } }
+            $f.count++; $script:AdminFails[$ip] = $f
+            Write-Log "ADMIN login failed from $ip"
+            Send $ctx 401 (Admin-Login 'סיסמה לא נכונה.'); return
+        }
+        $script:AdminFails.Remove($ip)
+        $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $token = [Convert]::ToBase64String($bytes) -replace '[+/=]', ''
+        $script:AdminSessions[$token] = (Get-Date).AddHours(4)
+        Write-Log "ADMIN login from $ip"
+        Redirect $ctx '/admin' @{ 'Set-Cookie' = "spcadm=$token; Path=/admin; HttpOnly; SameSite=Strict" }; return
+    }
+    if (-not (Get-AdminSession $req)) { Send $ctx 200 (Admin-Login); return }
+    if ($req.HttpMethod -eq 'POST' -and $path -eq '/admin/vm') { Admin-Action $ctx $req; return }
+    if ($req.HttpMethod -eq 'POST' -and $path -eq '/admin/create') { Admin-Create $ctx $req; return }
+    if ($path -eq '/admin/logout') { $c = $req.Cookies['spcadm']; if ($c) { $script:AdminSessions.Remove($c.Value) }; Redirect $ctx '/admin'; return }
+    Send $ctx 200 (Admin-Page)
+}
+
 # ---------------- start ----------------
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://+:$Port/")
 try { $listener.Start() } catch { Write-Log "cannot listen on ${Port}: $($_.Exception.Message)"; exit 1 }
 Write-Log "client website started on port $Port"
+try { Sync-RouterPorts } catch {}
 while ($listener.IsListening) {
     $ctx = $listener.GetContext()
     try { Handle $ctx }

@@ -14,13 +14,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("3.1.0.0")]
+[assembly: AssemblyVersion("3.2.0.0")]
 
 namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "3.1.0";
+        public const string Version = "3.2.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -139,6 +139,12 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             }
         }
         public static string VBox(string args) { return Run(VBM, args); }
+        public static string AdminPassword()
+        {
+            var f = Path.Combine(HostDir, "admin-password.txt");
+            for (int i = 0; i < 10 && !File.Exists(f); i++) Thread.Sleep(500);   // the website creates it on first start
+            return File.Exists(f) ? File.ReadAllText(f).Trim() : "";
+        }
 
         public static string VmState(string name)
         {
