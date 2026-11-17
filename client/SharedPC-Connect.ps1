@@ -19,7 +19,8 @@ $targets += [pscustomobject]@{ portal = 'http://sharedpc:8080'; rdp = 'sharedpc'
 
 function Find-Target {
     foreach ($t in $targets) {
-        try { if ((Invoke-WebRequest "$($t.portal)/" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200) { return $t } } catch {}
+        try { if ((Invoke-WebRequest "$($t.portal)/setup-status" -UseBasicParsing -TimeoutSec 4).StatusCode -eq 200) { return $t } } catch {}
+        try { if ((Invoke-WebRequest "$($t.portal)/" -UseBasicParsing -TimeoutSec 10).StatusCode -eq 200) { return $t } } catch {}
     }
     return $null
 }

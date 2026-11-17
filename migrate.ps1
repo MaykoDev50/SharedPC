@@ -2,6 +2,7 @@
 # Everyone shares the SAME Desktop, Documents, Downloads, Pictures, Music and Videos (C:\Shared\...),
 # and Google Chrome is installed for all users.
 $ErrorActionPreference = 'Continue'
+$ProgressPreference = 'SilentlyContinue'   # PowerShell 5.1 downloads are extremely slow with the progress bar on
 $Log = 'C:\SharedPC\migrate.log'
 function L([string]$m) { Add-Content $Log ('{0:yyyy-MM-dd HH:mm:ss}  migrate: {1}' -f (Get-Date), $m) -Encoding UTF8 }
 
@@ -69,8 +70,8 @@ $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 if (-not (Test-Path $chrome)) {
     $msi = Join-Path $env:TEMP 'chrome.msi'
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi' -OutFile $msi -UseBasicParsing
+        & curl.exe -L -s --fail --retry 3 -o $msi 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
+        if ($LASTEXITCODE -ne 0) { throw "download failed ($LASTEXITCODE)" }
         Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
         L 'Google Chrome installed'
     } catch { L "Chrome install failed: $($_.Exception.Message)" }

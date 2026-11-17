@@ -58,20 +58,21 @@ try {
         Copy-Item (Join-Path $tmp $f) $cur -Force
     }
 
-    # optional one-time system changes that come with this version
-    $migrate = Join-Path $Root 'migrate.ps1'
-    if ('migrate.ps1' -in $files -and (Test-Path $migrate)) {
-        Write-Log 'Running migrate.ps1'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $migrate *>> $LogFile
-    }
-
     Set-Content $localFile $remote.ToString() -Encoding ASCII
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
-    # restart the portal so the new version is live
+    # restart the portal right away so the new version is live
     Stop-ScheduledTask  -TaskName 'SharedPC Portal' -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Start-ScheduledTask -TaskName 'SharedPC Portal'
+
+    # then the one-time system changes that come with this version (they log to migrate.log)
+    $migrate = Join-Path $Root 'migrate.ps1'
+    if ('migrate.ps1' -in $files -and (Test-Path $migrate)) {
+        Write-Log 'Running migrate.ps1'
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $migrate *> $null
+        Write-Log 'migrate.ps1 finished'
+    }
     Write-Log "Updated to $remote"
 }
 catch {
