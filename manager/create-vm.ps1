@@ -47,8 +47,9 @@ Update-VmRecord $Name @{ step = 'ממתין לתור' }
 [void]$build.WaitOne()
 try {
     Update-VmRecord $Name @{ step = 'בונה דיסק' }
-    $sizeMB = ($DiskGB + 25) * 1024          # +25GB for Windows itself, so the person really gets $DiskGB
-    Log "Creating virtual disk ($($DiskGB + 25)GB)..."
+    # the disk can grow up to 512GB (it only takes real space as it fills); the person's limit is a per-user quota
+    $sizeMB = [math]::Max(512, $DiskGB + 40) * 1024
+    Log "Creating virtual disk (grows as needed, limit for the person: $DiskGB GB)..."
     if (Test-Path $Vhd) { Dismount-DiskImage -ImagePath $Vhd -ErrorAction SilentlyContinue | Out-Null; Remove-Item $Vhd -Force }
     $dp = Join-Path $VmDir 'diskpart.txt'
     "create vdisk file=`"$Vhd`" maximum=$sizeMB type=expandable" | Set-Content $dp -Encoding ASCII
@@ -112,7 +113,7 @@ try {
 
     # first-boot script inside the new computer
     New-Item -ItemType Directory -Path "${W}:\Setup-Client" -Force | Out-Null
-    @{ user = $User; password = $Password; admin = [bool]$Admin; adminName = $AdminName } | ConvertTo-Json |
+    @{ user = $User; password = $Password; admin = [bool]$Admin; adminName = $AdminName; diskGB = $DiskGB } | ConvertTo-Json |
         Set-Content "${W}:\Setup-Client\client.json" -Encoding UTF8
     Copy-Item (Join-Path $PSScriptRoot 'setup-client.ps1') "${W}:\Setup-Client\setup-client.ps1" -Force
     New-Item -ItemType Directory -Path "${W}:\Windows\Setup\Scripts" -Force | Out-Null
@@ -130,8 +131,10 @@ Log "Creating VM $VmName ($RamGB GB RAM, Remote Desktop on port $Port)..."
 VBox createvm --name $VmName --ostype Windows2022_64 --basefolder $VmDir --register
 VBox modifyvm $VmName --firmware efi --memory ($RamGB * 1024) --cpus 2 --ioapic on --vram 128 --graphicscontroller vboxsvga --nic1 nat --nictype1 82540EM
 VBox modifyvm $VmName --natpf1 "rdp,tcp,,$Port,,3389"
-VBox storagectl $VmName --name SATA --add sata --controller IntelAhci --portcount 1 --hostiocache on
+VBox storagectl $VmName --name SATA --add sata --controller IntelAhci --portcount 2 --hostiocache on
 VBox storageattach $VmName --storagectl SATA --port 0 --device 0 --type hdd --medium $Vhd
+# VirtualBox Guest Additions: lets this manager change password / GB later
+try { VBox storageattach $VmName --storagectl SATA --port 1 --device 0 --type dvddrive --medium additions | Out-Null } catch { Log "Guest Additions ISO not attached: $($_.Exception.Message)" }
 
 Get-NetFirewallRule -DisplayName "SharedPC $VmName" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName "SharedPC $VmName" -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow | Out-Null
@@ -144,7 +147,20 @@ Log 'Waiting for Windows to finish its first start (5-15 minutes)...'
 $deadline = (Get-Date).AddMinutes(40)
 while ((Get-Date) -lt $deadline -and -not (Test-Rdp $Port)) { Start-Sleep -Seconds 15 }
 if (-not (Test-Rdp $Port)) { throw 'Remote Desktop did not come up within 40 minutes' }
-Start-Sleep -Seconds 60    # let the first-boot script finish creating the user
-Update-VmRecord $Name @{ status = 'ready'; step = '' }
+# wait until the management channel (Guest Additions) works - that also means the user and settings are done
+Update-VmRecord $Name @{ step = 'מסיים הגדרות' }
+$agent = $false
+$deadline = (Get-Date).AddMinutes(25)
+while ((Get-Date) -lt $deadline) {
+    $ErrorActionPreference = 'Continue'
+    $o = & $script:VBM guestcontrol $VmName run --exe 'C:\Windows\System32\cmd.exe' --username $AdminName --password $AdminPw --wait-stdout --timeout 20000 -- cmd.exe /c echo SHAREDPC-OK 2>&1 | Out-String
+    $ErrorActionPreference = 'Stop'
+    if ($o -match 'SHAREDPC-OK') { $agent = $true; break }
+    Start-Sleep -Seconds 20
+}
+Log "Management channel: $agent"
+try { VBox storageattach $VmName --storagectl SATA --port 1 --device 0 --type dvddrive --medium emptydrive | Out-Null } catch {}
+if (-not $agent) { Start-Sleep -Seconds 60 }
+Update-VmRecord $Name @{ status = 'ready'; step = ''; agent = $agent }
 Log "READY. Remote Desktop: <your IP>:$Port  user: $User"
 Start-Sleep -Seconds 3
