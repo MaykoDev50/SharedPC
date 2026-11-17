@@ -1,0 +1,5 @@
+# Files the updater installs into C:\SharedPC (one per line)
+portal.ps1
+update.ps1
+setup.ps1
+install.bat
