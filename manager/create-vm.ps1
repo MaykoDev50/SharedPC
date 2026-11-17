@@ -134,7 +134,12 @@ VBox modifyvm $VmName --natpf1 "rdp,tcp,,$Port,,3389"
 VBox storagectl $VmName --name SATA --add sata --controller IntelAhci --portcount 2 --hostiocache on
 VBox storageattach $VmName --storagectl SATA --port 0 --device 0 --type hdd --medium $Vhd
 # VirtualBox Guest Additions: lets this manager change password / GB later
-try { VBox storageattach $VmName --storagectl SATA --port 1 --device 0 --type dvddrive --medium additions | Out-Null } catch { Log "Guest Additions ISO not attached: $($_.Exception.Message)" }
+$gaIso = Join-Path (Split-Path $script:VBM) 'VBoxGuestAdditions.iso'
+$gaAttached = $false
+if (Test-Path $gaIso) {
+    try { VBox storageattach $VmName --storagectl SATA --port 1 --device 0 --type dvddrive --medium $gaIso | Out-Null; $gaAttached = $true }
+    catch { Log "Guest Additions ISO not attached: $($_.Exception.Message)" }
+} else { Log "Guest Additions ISO not found at $gaIso" }
 
 Get-NetFirewallRule -DisplayName "SharedPC $VmName" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName "SharedPC $VmName" -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow | Out-Null
@@ -150,7 +155,7 @@ if (-not (Test-Rdp $Port)) { throw 'Remote Desktop did not come up within 40 min
 # wait until the management channel (Guest Additions) works - that also means the user and settings are done
 Update-VmRecord $Name @{ step = 'מסיים הגדרות' }
 $agent = $false
-$deadline = (Get-Date).AddMinutes(25)
+$deadline = if ($gaAttached) { (Get-Date).AddMinutes(25) } else { Get-Date }   # no Guest Additions -> nothing to wait for
 while ((Get-Date) -lt $deadline) {
     $ErrorActionPreference = 'Continue'
     $o = & $script:VBM guestcontrol $VmName run --exe 'C:\Windows\System32\cmd.exe' --username $AdminName --password $AdminPw --wait-stdout --timeout 20000 -- cmd.exe /c echo SHAREDPC-OK 2>&1 | Out-String
