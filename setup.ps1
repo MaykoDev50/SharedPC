@@ -125,7 +125,8 @@ try {
 
 # --- summary ---
 $tsExe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
-$tsIp  = if (Test-Path $tsExe) { (& $tsExe ip -4 2>$null | Select-Object -First 1) } else { $null }
+$tsIp  = $null
+if (Test-Path $tsExe) { try { $tsIp = & $tsExe ip -4 2>$null | Select-Object -First 1 } catch {} }
 $lanIp = Get-NetIPAddress -AddressFamily IPv4 |
          Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '100.*' } |
          Select-Object -ExpandProperty IPAddress -First 1

@@ -62,9 +62,16 @@ function Download([string]$url, [string]$dest) {
     & curl.exe -L --fail -s --retry 5 --retry-delay 5 -o $dest $url
     return ($LASTEXITCODE -eq 0 -and (Test-Path $dest) -and (Get-Item $dest).Length -gt 0)
 }
-function VBox { & $script:VBM @args; if ($LASTEXITCODE -ne 0) { throw "VBoxManage $($args -join ' ') failed ($LASTEXITCODE)" } }
+function VBox { $ErrorActionPreference = 'Continue'; & $script:VBM @args 2>&1 | ForEach-Object { Write-Host $_ }; if ($LASTEXITCODE -ne 0) { throw "VBoxManage $($args -join ' ') failed ($LASTEXITCODE)" } }
 function Get-SetupStatus {
     try { Invoke-RestMethod "http://127.0.0.1:$PortalPort/setup-status" -TimeoutSec 10 } catch { $null }
+}
+
+# any unexpected error: write it to the log and tell the user (instead of the window just closing)
+trap {
+    Log "CRASH: $($_.Exception.Message) (line $($_.InvocationInfo.ScriptLineNumber))"
+    Popup "ההתקנה נעצרה בגלל שגיאה לא צפויה.`n`n$($_.Exception.Message)`n`nאפשר להריץ שוב, היא תמשיך מאותה נקודה." | Out-Null
+    exit 1
 }
 
 Log '=============== SharedPC host installer (VirtualBox) started ==============='
@@ -149,8 +156,8 @@ if (-not (Has $state 'InviteCode')) {
 $AdminPw = [string]$state.AdminPassword
 
 if (-not (Has $state 'DiskReady')) {
-    & $script:VBM unregistervm $VMName 2>$null | Out-Null
-    & $script:VBM closemedium disk $Vhd 2>$null | Out-Null
+    try { & $script:VBM unregistervm $VMName 2>$null | Out-Null } catch {}
+    try { & $script:VBM closemedium disk $Vhd 2>$null | Out-Null } catch {}
     if (Test-Path $Vhd) { Dismount-DiskImage -ImagePath $Vhd -ErrorAction SilentlyContinue | Out-Null; Remove-Item $Vhd -Force }
 
     Log 'Creating virtual disk (127GB max, grows as needed)...'

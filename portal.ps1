@@ -80,6 +80,7 @@ function Read-Form($req) {
 
 # מי מחובר עכשיו (לפי quser)
 function Get-Sessions {
+    $ErrorActionPreference = 'Continue'   # quser writes to stderr when nobody is logged in
     $lines = & quser.exe 2>$null
     if (-not $lines) { return @() }
     foreach ($l in ($lines | Select-Object -Skip 1)) {
@@ -258,7 +259,8 @@ function Handle($ctx) {
             $from = $req.RemoteEndPoint.Address.ToString()
             if ($from -notin @('10.0.2.2', '127.0.0.1', '::1')) { Send $ctx 404 'not found' 'text/plain'; return }
             $ts   = 'C:\Program Files\Tailscale\tailscale.exe'
-            $tsIp = if (Test-Path $ts) { & $ts ip -4 2>$null | Select-Object -First 1 } else { $null }
+            $tsIp = $null
+            if (Test-Path $ts) { try { $tsIp = & $ts ip -4 2>$null | Select-Object -First 1 } catch {} }
             $status = [ordered]@{
                 firstbootDone = (Test-Path 'C:\SharedPC\firstboot-done.txt')
                 tailscaleIp   = $tsIp
