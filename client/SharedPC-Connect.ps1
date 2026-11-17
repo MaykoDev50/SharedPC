@@ -14,7 +14,8 @@ $targets = @()
 $cfgFile = Join-Path $AppDir 'connect.json'
 $cfg = if (Test-Path $cfgFile) { Get-Content $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
 if ($cfg -and $cfg.targets) { $targets += $cfg.targets }
-$targets += [pscustomobject]@{ portal = 'http://127.0.0.1:18080'; rdp = '127.0.0.1:13389' }
+# Remote Desktop refuses 127.0.0.1 ("console session in progress"), so the host uses 127.0.0.2
+$targets += [pscustomobject]@{ portal = 'http://127.0.0.1:18080'; rdp = '127.0.0.2:13389' }
 $targets += [pscustomobject]@{ portal = 'http://sharedpc:8080';   rdp = 'sharedpc' }
 
 function Find-Target {

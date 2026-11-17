@@ -243,7 +243,7 @@ function Handle($ctx) {
             $hostName = $req.Url.Host
             $rdp = @(
                 # when opened through the VirtualBox port-forward on the host (18080), RDP is on 13389
-                $(if ($req.Url.Port -eq 18080) { "full address:s:${hostName}:13389" } else { "full address:s:$hostName" }),
+                $(if ($req.Url.Port -eq 18080) { "full address:s:127.0.0.2:13389" } else { "full address:s:$hostName" }),
                 "username:s:$env:COMPUTERNAME\$u",
                 'screen mode id:i:2', 'use multimon:i:0', 'session bpp:i:32',
                 'dynamic resolution:i:1', 'smart sizing:i:1',

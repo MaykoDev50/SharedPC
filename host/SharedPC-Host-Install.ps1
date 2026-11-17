@@ -264,7 +264,7 @@ if ($vmList -notmatch "`"$VMName`"") {
     VBox createvm --name $VMName --ostype Windows2022_64 --register
     VBox modifyvm $VMName --firmware efi --memory $memMB --cpus $cpus --ioapic on --vram 128 --graphicscontroller vboxsvga --nic1 nat --nictype1 82540EM
     VBox modifyvm $VMName --natpf1 "portal,tcp,127.0.0.1,$PortalPort,,8080"
-    VBox modifyvm $VMName --natpf1 "rdp,tcp,127.0.0.1,$RdpPort,,3389"
+    VBox modifyvm $VMName --natpf1 "rdp,tcp,127.0.0.2,$RdpPort,,3389"   # mstsc refuses 127.0.0.1
     VBox storagectl $VMName --name SATA --add sata --controller IntelAhci --portcount 1 --hostiocache on
     VBox storageattach $VMName --storagectl SATA --port 0 --device 0 --type hdd --medium $Vhd
 }
