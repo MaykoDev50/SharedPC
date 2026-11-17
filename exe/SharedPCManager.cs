@@ -18,7 +18,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("2.0.2.0")]
+[assembly: AssemblyVersion("2.0.3.0")]
 
 namespace SharedPC
 {
@@ -32,7 +32,7 @@ namespace SharedPC
         const string Repo = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/manager/";
         static readonly string[] Scripts = { "common.ps1", "create-vm.ps1", "setup-client.ps1" };
         public const string Title = "ניהול מחשבים וירטואליים";
-        public const string Version = "2.0.2";
+        public const string Version = "2.0.3";
 
         public static readonly Color Bg = Color.FromArgb(15, 23, 42), Card = Color.FromArgb(30, 41, 59), Fg = Color.FromArgb(226, 232, 240),
             Muted = Color.FromArgb(148, 163, 184), Blue = Color.FromArgb(37, 99, 235), Red = Color.FromArgb(153, 27, 27), Green = Color.FromArgb(22, 101, 52);
@@ -279,6 +279,8 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             var bLog = UI.Btn("📄  יומן הקמה", App.Card, 140);
             var bDel = UI.Btn("🗑️  מחיקה", App.Red, 120);
             var bRef = UI.Btn("🔄  רענון", App.Card, 120);
+            var bShot = UI.Btn("📷  מה רואים במסך", App.Card, 170);
+            bShot.Click += (s, e) => Screenshot();
             bNew.Click += (s, e) => NewComputer();
             bCopy.Click += (s, e) => CopyDetails();
             bConnect.Click += (s, e) => ConnectMyself();
@@ -287,7 +289,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             bLog.Click += (s, e) => { var n = Sel(); if (n == null) return; var l = Path.Combine(App.HostDir, "vms", n, "create.log"); if (File.Exists(l)) Process.Start("notepad.exe", "\"" + l + "\""); else App.Say("אין יומן עדיין."); };
             bDel.Click += (s, e) => Delete();
             bRef.Click += (s, e) => Reload();
-            bar.Controls.AddRange(new Control[] { bNew, bCopy, bConnect, bStart, bStop, bLog, bDel, bRef });
+            bar.Controls.AddRange(new Control[] { bNew, bCopy, bConnect, bStart, bStop, bLog, bShot, bDel, bRef });
             var tip = new ToolTip();
             tip.SetToolTip(bCopy, "מעתיק כתובת, שם משתמש וסיסמה כדי לשלוח ללקוח (גם דאבל-קליק על שורה)");
             tip.SetToolTip(bConnect, "פותח את המחשב אצלך בחיבור לשולחן עבודה מרוחק");
@@ -386,12 +388,30 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             Clipboard.SetText(Details(r));
             App.Say(Details(r) + "\n\n✅ הועתק. הדבק (Ctrl+V) ושלח ללקוח.\nהלקוח פותח \"חיבור לשולחן עבודה מרוחק\" (mstsc) ומקליד את הפרטים.");
         }
+        public static string CompName(string vm) { var c = ("PC-" + System.Text.RegularExpressions.Regex.Replace(vm, "[^A-Za-z0-9-]", "")).ToUpper(); return c.Length > 15 ? c.Substring(0, 15) : c; }
         void ConnectMyself()
         {
             var n = Sel(); if (n == null) return; var r = Rec(n); if (r == null) return;
-            var port = Store.S(r, "port");
-            App.Run("cmdkey.exe", "/generic:TERMSRV/127.0.0.2 /user:\"" + Store.S(r, "user") + "\" /pass:\"" + Store.S(r, "password") + "\"");
-            Process.Start("mstsc.exe", "/v:127.0.0.2:" + port);
+            var port = Store.S(r, "port"); var user = CompName(n) + "\\" + Store.S(r, "user");
+            App.Run("cmdkey.exe", "/delete:TERMSRV/127.0.0.2");
+            var rdp = Path.Combine(App.HostDir, "vms", n, n + ".rdp");
+            File.WriteAllText(rdp, "full address:s:127.0.0.2:" + port + "\r\nusername:s:" + user + "\r\nprompt for credentials:i:1\r\nauthentication level:i:0\r\nscreen mode id:i:2\r\n", Encoding.ASCII);
+            Clipboard.SetText(Store.S(r, "password"));
+            Process.Start("mstsc.exe", "\"" + rdp + "\"");
+            App.Say("נפתח חלון התחברות.\nשם המשתמש: " + user + "\nהסיסמה הועתקה – הדבק אותה (Ctrl+V) ולחץ אישור.");
+        }
+        void Screenshot()
+        {
+            var n = Sel(); if (n == null) return;
+            var png = Path.Combine(App.HostDir, "vms", n, "screen.png");
+            try { File.Delete(png); } catch { }
+            var o = App.VBox("controlvm \"PC-" + n + "\" screenshotpng \"" + png + "\"");
+            App.Log("screenshot " + n + ": " + o.Trim());
+            if (!File.Exists(png)) { App.Say("לא הצלחתי לצלם את המסך (המחשב כבוי?)."); return; }
+            var f = new Form { Text = "המסך של " + n, Size = new Size(1100, 850), StartPosition = FormStartPosition.CenterScreen, BackColor = App.Bg };
+            byte[] bytes = File.ReadAllBytes(png);
+            f.Controls.Add(new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, Image = Image.FromStream(new MemoryStream(bytes)) });
+            f.Show(this);
         }
         void Act(string what)
         {
