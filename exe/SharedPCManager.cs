@@ -18,7 +18,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyVersion("2.1.1.0")]
 
 namespace SharedPC
 {
@@ -32,7 +32,7 @@ namespace SharedPC
         const string Repo = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/manager/";
         static readonly string[] Scripts = { "common.ps1", "create-vm.ps1", "setup-client.ps1" };
         public const string Title = "ניהול מחשבים וירטואליים";
-        public const string Version = "2.1.0";
+        public const string Version = "2.1.1";
 
         public static readonly Color Bg = Color.FromArgb(15, 23, 42), Card = Color.FromArgb(30, 41, 59), Fg = Color.FromArgb(226, 232, 240),
             Muted = Color.FromArgb(148, 163, 184), Blue = Color.FromArgb(37, 99, 235), Red = Color.FromArgb(153, 27, 27), Green = Color.FromArgb(22, 101, 52);
@@ -255,7 +255,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             if (controlUrl != null) return true;
             foreach (var st in new[] { "urn:schemas-upnp-org:device:InternetGatewayDevice:1", "urn:schemas-upnp-org:device:InternetGatewayDevice:2", "upnp:rootdevice" })
             {
-                var locations = new List<string>();
+                var locations = new List<string>(); var sources = new Dictionary<string, string>();
                 using (var udp = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Parse(lanIp), 0)))
                 {
                     udp.Client.ReceiveTimeout = 2500;
@@ -270,7 +270,7 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                             var from = new IPEndPoint(IPAddress.Any, 0);
                             var resp = Encoding.ASCII.GetString(udp.Receive(ref from));
                             var m = System.Text.RegularExpressions.Regex.Match(resp, "(?im)^location:\\s*(\\S+)");
-                            if (m.Success && !locations.Contains(m.Groups[1].Value)) locations.Add(m.Groups[1].Value);
+                            if (m.Success && !locations.Contains(m.Groups[1].Value)) { locations.Add(m.Groups[1].Value); sources[m.Groups[1].Value] = from.Address.ToString(); }
                         }
                         catch (System.Net.Sockets.SocketException) { break; }
                     }
@@ -287,6 +287,10 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                             var cu = Tag(rest, "controlURL"); if (cu == "") continue;
                             var u = new Uri(loc);
                             controlUrl = cu.StartsWith("http") ? cu : u.GetLeftPart(UriPartial.Authority) + (cu.StartsWith("/") ? "" : "/") + cu;
+                            // talk to the router over IPv4 (some routers refuse IPv4 port mappings requested over IPv6)
+                            string src;
+                            if (sources.TryGetValue(loc, out src) && src.Contains(".") && !src.Contains(":"))
+                            { var cuU = new Uri(controlUrl); controlUrl = new UriBuilder(cuU) { Host = src }.Uri.ToString(); }
                             serviceType = svc;
                             App.Log("UPnP router found: " + controlUrl + " (" + svc + ")");
                             return true;
@@ -305,6 +309,35 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 100 && b[1] >= 64 && b[1] <= 127) || b[0] == 127 || b[0] == 0;
         }
 
+        static void AddMapping(int port, string lanIp, int lease)
+        {
+            Soap("AddPortMapping",
+                "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + port + "</NewExternalPort><NewProtocol>TCP</NewProtocol>" +
+                "<NewInternalPort>" + port + "</NewInternalPort><NewInternalClient>" + lanIp + "</NewInternalClient><NewEnabled>1</NewEnabled>" +
+                "<NewPortMappingDescription>SharedPC " + port + "</NewPortMappingDescription><NewLeaseDuration>" + lease + "</NewLeaseDuration>");
+        }
+        static bool Map(int port, string lanIp)
+        {
+            try { AddMapping(port, lanIp, 0); return true; }
+            catch (Exception ex)
+            {
+                var msg = ex.Message;
+                if (msg.Contains("725")) { AddMapping(port, lanIp, 604800); return true; }   // router accepts only timed leases (refreshed every 10 min anyway)
+                if (!msg.Contains("718")) throw;
+                // 718 = a mapping for this port already exists: fine if it already points to this PC, otherwise replace it
+                try
+                {
+                    var cur = Soap("GetSpecificPortMappingEntry", "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + port + "</NewExternalPort><NewProtocol>TCP</NewProtocol>");
+                    if (Tag(cur, "NewInternalClient") == lanIp && Tag(cur, "NewInternalPort") == port.ToString()) { App.Log("UPnP " + port + " already forwarded to this PC"); return true; }
+                    App.Log("UPnP " + port + " points to " + Tag(cur, "NewInternalClient") + ":" + Tag(cur, "NewInternalPort") + " - replacing");
+                }
+                catch (Exception qe) { App.Log("UPnP query " + port + ": " + qe.Message); }
+                try { Soap("DeletePortMapping", "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + port + "</NewExternalPort><NewProtocol>TCP</NewProtocol>"); } catch { }
+                AddMapping(port, lanIp, 0);
+                return true;
+            }
+        }
+
         // make sure every ready computer's port is forwarded to this PC
         public static void Sync(string lanIp, string publicIp, IEnumerable<int> ports)
         {
@@ -319,13 +352,9 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                 {
                     try
                     {
-                        Soap("AddPortMapping",
-                            "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + port + "</NewExternalPort><NewProtocol>TCP</NewProtocol>" +
-                            "<NewInternalPort>" + port + "</NewInternalPort><NewInternalClient>" + lanIp + "</NewInternalClient><NewEnabled>1</NewEnabled>" +
-                            "<NewPortMappingDescription>SharedPC " + port + "</NewPortMappingDescription><NewLeaseDuration>0</NewLeaseDuration>");
-                        done++;
+                        if (Map(port, lanIp)) done++;
                     }
-                    catch (Exception ex) { errors.Add(port + ": " + ex.Message); App.Log("UPnP map " + port + " failed: " + ex.Message); }
+                    catch (Exception ex) { var code = Tag(ex.Message, "errorCode") + " " + Tag(ex.Message, "errorDescription"); errors.Add(port + " (" + (code.Trim() != "" ? code.Trim() : ex.Message) + ")"); App.Log("UPnP map " + port + " failed: " + ex.Message); }
                 }
                 Ok = errors.Count == 0;
                 Status = Ok ? "✅ הפורטים פתוחים בראוטר (" + done + "). אפשר להתחבר מכל מקום עם " + (ExternalIp != "" ? ExternalIp : publicIp) + ":פורט"
