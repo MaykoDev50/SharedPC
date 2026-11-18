@@ -14,13 +14,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("3.2.0.0")]
+[assembly: AssemblyVersion("4.0.0.0")]
 
 namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "3.2.0";
+        public const string Version = "4.0.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -50,8 +50,13 @@ namespace SharedPC
             {
                 Directory.CreateDirectory(ScriptDir);
                 Log("Manager " + Version + " started (admin)");
-                if (!File.Exists(VBM)) { Say("VirtualBox לא מותקן במחשב הזה.\nצריך להריץ קודם את ההתקנה הראשונית."); return; }
-                if (!File.Exists(Iso)) { Say("לא נמצא קובץ Windows Server ב-" + Iso + "\nצריך להריץ קודם את ההתקנה הראשונית."); return; }
+                // first time on this computer: install VirtualBox + download Windows Server automatically
+                if (!File.Exists(VBM) || !File.Exists(Iso) || new FileInfo(Iso).Length < 3L * 1024 * 1024 * 1024)
+                {
+                    var setup = new SetupForm();
+                    Application.Run(setup);
+                    if (!setup.Done) return;
+                }
                 UpdateScripts();
                 RegisterAutostart();
                 Application.Run(new MainForm());
