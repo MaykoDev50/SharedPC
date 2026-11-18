@@ -228,9 +228,11 @@ namespace SharedPC
                 Clipboard.SetText(txt);
                 App.Say(txt + "\n\n✅ הועתק. שלח לשותף יחד עם התוכנה SharedPC-Admin.\nמי שיש לו את הסיסמה הזו יכול ליצור ולמחוק מחשבים – אל תשלח אותה ללקוחות.");
             };
+            updBtn = new Btn("⬆️ בדוק עדכון", T.Card, 150, 28); updBtn.Font = T.F(9, true);
+            updBtn.Click += (s, e) => CheckUpdate(true);
             var wall = new Btn("🖼️ תמונת רקע", T.Card, 120, 28); wall.Font = T.F(9, true);
             wall.Click += (s, e) => PickWallpaper();
-            siteRow.Controls.AddRange(new Control[] { siteLbl, copySite, openSite, remote, wall });
+            siteRow.Controls.AddRange(new Control[] { siteLbl, copySite, openSite, remote, wall, updBtn });
             header.Controls.Add(siteRow); header.Controls.Add(routerLbl); header.Controls.Add(chipRow); header.Controls.Add(titleRow);
 
             // ---------- list (right side) ----------
@@ -244,21 +246,44 @@ namespace SharedPC
 
             timer.Tick += (s, e) => Reload();
             Shown += (s, e) => { Reload(); timer.Start(); FetchPublicIp(); };
-            // while open: look for a new version every 2 hours
-            var upd = new System.Windows.Forms.Timer { Interval = 2 * 60 * 60 * 1000 }; bool asked = false;
-            upd.Tick += (s, e) => Task.Run(() => { string v; return App.NewerAvailable(out v) ? v : null; }).ContinueWith(t =>
-            {
-                if (t.Result == null || asked || !IsHandleCreated) return;
-                BeginInvoke((Action)(() =>
-                {
-                    asked = true;
-                    if (App.Ask("יש גרסה חדשה של התוכנה (" + t.Result + ").\nלעדכן עכשיו? התוכנה תיסגר ותיפתח מחדש תוך כמה שניות.\n(המחשבים של הלקוחות ממשיכים לעבוד כרגיל)"))
-                    { if (App.SelfUpdate()) Application.Exit(); else App.Say("העדכון לא הצליח עכשיו – הוא ינסה שוב בפתיחה הבאה."); }
-                }));
-            });
+            // the update button turns green by itself when a new version exists (checked now and every 30 minutes)
+            var upd = new System.Windows.Forms.Timer { Interval = 30 * 60 * 1000 };
+            upd.Tick += (s, e) => CheckUpdate(false);
+            Shown += (s, e) => CheckUpdate(false);
             upd.Start();
             KeyPreview = true;
             KeyDown += (s, e) => { if (e.Control && e.KeyCode == Keys.N) NewComputer(); if (e.KeyCode == Keys.F5) Reload(); };
+        }
+
+        Btn updBtn; string newVersion;
+        // userClicked=false: only light up the button. userClicked=true: update now (or say it's up to date)
+        void CheckUpdate(bool userClicked)
+        {
+            if (userClicked && newVersion != null)
+            {
+                if (!App.Ask("לעדכן עכשיו לגרסה " + newVersion + "?\nהתוכנה תיסגר ותיפתח מחדש תוך כמה שניות.\n(המחשבים של הלקוחות ממשיכים לעבוד כרגיל)")) return;
+                updBtn.Text = "⏳ מעדכן…"; updBtn.Enabled = false;
+                Task.Run(() => App.SelfUpdate()).ContinueWith(t => BeginInvoke((Action)(() =>
+                {
+                    if (t.Result) { Application.Exit(); return; }
+                    updBtn.Enabled = true; updBtn.Text = "⬆️ עדכן עכשיו (" + newVersion + ")";
+                    App.Say("העדכון לא הצליח כרגע (אולי אין אינטרנט). נסה שוב בעוד כמה דקות.", MessageBoxIcon.Warning);
+                })));
+                return;
+            }
+            if (userClicked) { updBtn.Text = "⏳ בודק…"; updBtn.Enabled = false; }
+            Task.Run(() => { string v; return App.NewerAvailable(out v) ? v : null; }).ContinueWith(t =>
+            {
+                if (!IsHandleCreated) return;
+                BeginInvoke((Action)(() =>
+                {
+                    updBtn.Enabled = true; newVersion = t.Result;
+                    if (newVersion != null) { updBtn.Text = "⬆️ עדכן עכשיו (" + newVersion + ")"; updBtn.Base = T.Green; }
+                    else { updBtn.Text = "✓ גרסה " + App.Version; updBtn.Base = T.Card; }
+                    updBtn.Invalidate();
+                    if (userClicked) { if (newVersion != null) CheckUpdate(true); else App.Say("✅ יש לך את הגרסה הכי חדשה (" + App.Version + ")."); }
+                }));
+            });
         }
 
         void PickWallpaper()
