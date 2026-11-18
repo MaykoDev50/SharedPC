@@ -191,6 +191,7 @@ namespace SharedPC
         string selected;
         Dictionary<string, VmTile> tiles = new Dictionary<string, VmTile>();
         Dictionary<string, string> states = new Dictionary<string, string>();
+        Dictionary<string, string> working = new Dictionary<string, string>();   // name -> "starting"/"stopping" while a power action runs
         Dictionary<string, Tuple<double, DateTime>> usage = new Dictionary<string, Tuple<double, DateTime>>();
         System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 8000 };
         bool loading; string lastPorts; DateTime lastSync = DateTime.MinValue;
@@ -357,6 +358,7 @@ namespace SharedPC
                     loading = false;
                     if (t.IsFaulted) { App.Log("reload: " + t.Exception); return; }
                     var recs = t.Result.Item1; states = t.Result.Item2;
+                    foreach (var w in working) states[w.Key] = w.Value;
                     UpdateList(recs);
                     chipCount.Value = t.Result.Item4 + " / " + recs.Count; chipCount.Caption = "מחשבים פועלים";
                     chipRam.Value = t.Result.Item3 + " / " + App.TotalRamGB() + " GB"; chipRam.Caption = "זיכרון בשימוש";
@@ -428,7 +430,11 @@ namespace SharedPC
             cUser.Text = App.FullUser(r);
             cPass.Text = passShown ? Store.S(r, "password") : "••••••••••";
             var ready = Store.S(r, "status") == "ready";
-            bStart.Enabled = ready && s != "running"; bStop.Enabled = ready && s == "running"; bRestart.Enabled = ready && s == "running"; bConnect.Enabled = ready && s == "running";
+            var busy = working.ContainsKey(selected);
+            // buttons stay clickable - if something can't be done right now, the click explains why
+            foreach (var b in new[] { bStart, bStop, bRestart, bConnect }) b.Enabled = !busy && ready;
+            bStart.Base = s == "running" ? T.Gray : T.Green; bStop.Base = s == "running" ? T.Red : T.Gray; bRestart.Base = s == "running" ? T.Card : T.Gray;
+            foreach (var b in new[] { bStart, bStop, bRestart }) b.Invalidate();
             agentNote.Text = App.HasAgent(r) ? "" : "⚠️ המחשב הזה נוצר בגרסה ישנה: שינוי נפח, סיסמה והרשאות לא זמין בו. מחשבים חדשים תומכים בכל ההגדרות.";
             Tuple<double, DateTime> u; var limit = Store.I(r, "diskGB");
             if (usage.TryGetValue(selected, out u)) { usageBar.Value = u.Item1; usageBar.Max = limit; usageLbl.Text = "בשימוש " + u.Item1.ToString("0.0") + " GB מתוך " + limit + " GB   (נבדק " + u.Item2.ToString("HH:mm") + ")"; }
@@ -443,7 +449,7 @@ namespace SharedPC
             Task.Run(work).ContinueWith(t => BeginInvoke((Action)(() =>
             {
                 Cursor = Cursors.Default; Text = old;
-                if (t.IsFaulted) { App.Error(t.Exception.InnerException ?? t.Exception); return; }
+                if (t.IsFaulted) { working.Clear(); App.Error(t.Exception.InnerException ?? t.Exception); Reload(); return; }
                 done(t.Result);
             })));
         }
@@ -458,16 +464,26 @@ namespace SharedPC
 
         void FetchUsage(string name, bool userAsked)
         {
-            var r = Store.Get(name); if (r == null || !App.HasAgent(r)) return;
-            string s; states.TryGetValue(name, out s); if (s != "running") { if (userAsked) App.Say("המחשב כבוי."); return; }
+            var r = Store.Get(name); if (r == null) return;
+            if (!App.HasAgent(r)) { if (userAsked) App.Say("המחשב הזה נוצר בגרסה ישנה, ולכן אי אפשר לבדוק בו כמה נפח בשימוש."); return; }
+            string s; states.TryGetValue(name, out s);
+            if (s != "running") { if (userAsked) App.Say("המחשב כבוי – הדלק אותו כדי לבדוק כמה נפח בשימוש."); return; }
             Tuple<double, DateTime> u; if (!userAsked && usage.TryGetValue(name, out u) && (DateTime.Now - u.Item2).TotalMinutes < 5) return;
             var full = App.FullUser(r);
+            if (userAsked && selected == name) usageLbl.Text = "⏳ בודק…";
             Task.Run(() => App.Guest(r, "fsutil quota query C:", 60000)).ContinueWith(t =>
             {
-                if (t.IsFaulted || !IsHandleCreated) return;
-                double gb = ParseUsage(t.Result, full, Store.S(r, "user"));
-                if (gb < 0) { App.Log("usage parse failed for " + name + ": " + t.Result); return; }
-                BeginInvoke((Action)(() => { usage[name] = Tuple.Create(gb, DateTime.Now); if (selected == name) ShowSelected(); }));
+                if (!IsHandleCreated) return;
+                var outp = t.IsFaulted ? t.Exception.InnerException.Message : t.Result;
+                double gb = t.IsFaulted ? -1 : ParseUsage(outp, full, Store.S(r, "user"));
+                BeginInvoke((Action)(() =>
+                {
+                    if (gb >= 0) { usage[name] = Tuple.Create(gb, DateTime.Now); if (selected == name) ShowSelected(); return; }
+                    App.Log("usage failed for " + name + ": " + outp);
+                    if (selected == name) ShowSelected();
+                    if (userAsked) App.Say(App.GuestOk(outp) ? "עדיין לא נשמרו קבצים של הלקוח (0 GB בשימוש)." : App.GuestProblem(outp));
+                    if (App.GuestOk(outp)) { usage[name] = Tuple.Create(0.0, DateTime.Now); if (selected == name) ShowSelected(); }
+                }));
             });
         }
         static double ParseUsage(string output, string fullUser, string user)
@@ -490,7 +506,7 @@ namespace SharedPC
             Busy("משנה נפח", () => App.Guest(r, "fsutil quota modify C: " + warn + " " + lim + " " + App.FullUser(r)), o =>
             {
                 App.Log("quota " + selected + " " + gb + "GB: " + o.Trim());
-                if (Regex.IsMatch(o, "error|failed|denied", RegexOptions.IgnoreCase) && !o.Contains("successfully")) { App.Say("השינוי נכשל:\n" + o.Trim()); return; }
+                if (!App.GuestOk(o) || (Regex.IsMatch(o, "error|failed|denied", RegexOptions.IgnoreCase) && !o.Contains("successfully"))) { App.Say("השינוי נכשל:\n" + App.GuestProblem(o), MessageBoxIcon.Warning); return; }
                 Store.Set(selected, "diskGB", gb); App.Say("✅ הנפח של " + selected + " עודכן ל-" + gb + " GB."); ShowSelected();
             });
         }
@@ -501,7 +517,7 @@ namespace SharedPC
             Busy("משנה סיסמה", () => App.Guest(r, "net user " + Store.S(r, "user") + " " + pw), o =>
             {
                 App.Log("password " + selected + ": " + o.Trim());
-                if (!o.Contains("successfully") && !o.Contains("בהצלחה")) { App.Say("השינוי נכשל:\n" + o.Trim()); return; }
+                if (!o.Contains("successfully") && !o.Contains("בהצלחה")) { App.Say("השינוי נכשל:\n" + App.GuestProblem(o), MessageBoxIcon.Warning); return; }
                 Store.Set(selected, "password", pw); pwBox.Text = ""; Clipboard.SetText(pw);
                 App.Say("✅ הסיסמה של " + selected + " שונתה (והועתקה ללוח)."); ShowSelected();
             });
@@ -513,6 +529,7 @@ namespace SharedPC
             Busy("משנה הרשאות", () => App.Guest(r, "net localgroup Administrators " + Store.S(r, "user") + (on ? " /add" : " /delete")), o =>
             {
                 App.Log("admin " + selected + " " + on + ": " + o.Trim());
+                if (!App.GuestOk(o)) { App.Say("השינוי נכשל:\n" + App.GuestProblem(o), MessageBoxIcon.Warning); return; }
                 Store.Set(selected, "admin", on); App.Say(on ? "✅ " + selected + " קיבל הרשאות מנהל." : "✅ ההרשאות של " + selected + " הוסרו."); ShowSelected();
             });
         }
@@ -567,6 +584,8 @@ namespace SharedPC
         void ConnectMyself()
         {
             var r = Store.Get(selected); if (r == null) return;
+            string cur; states.TryGetValue(selected, out cur);
+            if (cur != "running") { if (App.Ask(selected + " כבוי. להדליק אותו עכשיו?\n(אחרי שיידלק, חכה דקה ולחץ שוב \"התחבר\")")) Power("start"); return; }
             App.Run("cmdkey.exe", "/delete:TERMSRV/127.0.0.2");
             var dir = Path.Combine(App.HostDir, "vms", selected); Directory.CreateDirectory(dir);
             var rdp = Path.Combine(dir, selected + ".rdp");
@@ -578,14 +597,26 @@ namespace SharedPC
         void Power(string what)
         {
             var name = selected; if (name == null) return;
+            var r = Store.Get(name); if (r == null) return;
+            string cur; states.TryGetValue(name, out cur);
+            if (what == "stop" && cur != "running") { App.Say(name + " כבר כבוי."); return; }
+            if (what == "start" && cur == "running") { App.Say(name + " כבר דלוק. לחץ \"התחבר\" כדי להיכנס אליו."); return; }
+            if (what == "restart" && cur != "running") what = "start";
             if (what != "start" && !App.Ask((what == "stop" ? "לכבות את " : "להפעיל מחדש את ") + name + "?\nמי שמחובר אליו יתנתק.")) return;
-            Store.Set(name, "stopped", what == "stop");
-            Busy(what == "start" ? "מפעיל" : what == "stop" ? "מכבה" : "מפעיל מחדש", () =>
+            // show it right away in the list, so it is clear the click worked
+            working[name] = what == "stop" ? "stopping" : "starting"; states[name] = working[name]; ShowSelected(); UpdateTile(name);
+            Busy(what == "start" ? "מדליק את " + name : what == "stop" ? "מכבה את " + name + " (עד דקה וחצי)" : "מפעיל מחדש את " + name, () =>
             {
-                if (what == "start") return App.VBox("startvm \"PC-" + name + "\" --type headless");
-                if (what == "stop") return App.VBox("controlvm \"PC-" + name + "\" acpipowerbutton");
-                return App.VBox("controlvm \"PC-" + name + "\" reset");
-            }, o => { App.Log(what + " " + name + ": " + o.Trim()); Reload(); });
+                if (what == "start") return App.StartVm(name);
+                if (what == "stop") return App.StopVm(r);
+                return App.RestartVm(r);
+            }, o => { working.Remove(name); App.Log(what + " " + name + ": " + o.Replace("\n", " ")); Reload(); App.Say(o, o.StartsWith("❌") ? MessageBoxIcon.Error : MessageBoxIcon.Information); });
+        }
+        void UpdateTile(string name)
+        {
+            VmTile t; var r = Store.Get(name); if (r == null || !tiles.TryGetValue(name, out t)) return;
+            string s; states.TryGetValue(name, out s);
+            t.StateText = StateText(r, s) + " · " + Store.S(r, "user"); t.Dot = StateColor(r, s); t.Invalidate();
         }
         void Screenshot()
         {

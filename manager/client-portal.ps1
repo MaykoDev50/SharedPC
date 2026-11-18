@@ -293,7 +293,7 @@ function Admin-Page([string]$msg = '', [string]$kind = 'ok') {
     $rows = foreach ($r in $recs) {
         $st = if ($r.status -eq 'creating') { "<span class='pill'><span class='dot busy'></span>בהקמה · $(Enc $r.step)</span>" }
               elseif ($r.status -eq 'failed') { "<span class='pill'><span class='dot' style='background:#ef4444'></span>נכשל</span>" }
-              else { $s = Get-VmState "PC-$($r.name)"; if ($s -eq 'running') { "<span class='pill'><span class='dot on'></span>פועל</span>" } else { "<span class='pill'><span class='dot off'></span>כבוי</span>" } }
+              else { $s = Get-VmState "PC-$($r.name)"; if ($s -eq 'running') { "<span class='pill'><span class='dot on'></span>פועל</span>" } elseif ($s -in 'stopping','starting','restoring','saving') { "<span class='pill'><span class='dot busy'></span>רגע…</span>" } else { "<span class='pill'><span class='dot off'></span>כבוי</span>" } }
         $n = Enc $r.name
         $details = Enc ("כתובת: ${ip}:$($r.port)`nשם משתמש: $(CompName $r.name)\$($r.user)`nסיסמה: $($r.password)`n`nאתר לניהול המחשב: http://${ip}:$Port")
         $agentNote = if (Has-Agent $r) { '' } else { "<div class='hint'>⚠️ נוצר בגרסה ישנה – שינוי נפח/סיסמה לא זמין.</div>" }
@@ -301,12 +301,14 @@ function Admin-Page([string]$msg = '', [string]$kind = 'ok') {
 <div class="card">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
 <div><h2 style="margin:0">🖥️ $n</h2><div class="muted">$(Enc "$(CompName $r.name)\$($r.user)") · ${ip}:$($r.port) · $($r.diskGB) GB · RAM $($r.ramGB) GB</div></div>$st</div>
+$(if ($r.status -eq 'ready') { $u = $script:Usage[$r.name]; if ($u) { "<div class='muted' style='margin-top:8px'>💾 בשימוש <b style='color:#ecf0f7'>$($u.gb) GB</b> מתוך $($r.diskGB) GB · נבדק $($u.at.ToString('HH:mm'))</div>" } else { "<div class='muted' style='margin-top:8px'>💾 מגבלה: $($r.diskGB) GB</div>" } })
 <details style="margin-top:12px"><summary class="muted" style="cursor:pointer">פרטי חיבור ללקוח</summary>
 <textarea readonly style="width:100%;height:110px;margin-top:8px;background:#1a2235;color:#ecf0f7;border:1px solid #2d3852;border-radius:10px;padding:10px;font:inherit;direction:rtl">$details</textarea></details>
 <div class="actions" style="margin-top:12px">
 <form method="post" action="/admin/vm"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="start"><button class="green small">▶ הפעל</button></form>
 <form method="post" action="/admin/vm"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="restart"><button class="ghost small">↻ הפעל מחדש</button></form>
 <form method="post" action="/admin/vm"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="stop"><button class="ghost small">⏻ כבה</button></form>
+<form method="post" action="/admin/vm"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="usage"><button class="ghost small">💾 בדוק נפח</button></form>
 <form method="post" action="/admin/vm" onsubmit="return confirm('למחוק את $n לגמרי? כל הקבצים שבו יימחקו.')"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="delete"><button class="small" style="background:#991b1b">🗑 מחק</button></form>
 </div>
 <details style="margin-top:12px"><summary class="muted" style="cursor:pointer">⚙️ הגדרות</summary>
@@ -349,12 +351,33 @@ function Admin-Action($ctx, $req) {
     $name = [string]$f['n']; $a = [string]$f['a']; $v = ([string]$f['v']).Trim()
     $r = Get-VmRecords | Where-Object { $_.name -eq $name } | Select-Object -First 1
     if (-not $r) { Send $ctx 200 (Admin-Page 'המחשב לא נמצא.' 'err'); return }
-    $vm = "PC-$name"
+    $vm = "PC-$name"; $kind = $null
     $ErrorActionPreference = 'Continue'
     switch ($a) {
-        'start'   { & $script:VBM startvm $vm --type headless 2>&1 | Out-Null; Update-VmRecord $name @{ stopped = $false }; $msg = "$name מופעל." }
-        'stop'    { & $script:VBM controlvm $vm acpipowerbutton 2>&1 | Out-Null; Update-VmRecord $name @{ stopped = $true }; $msg = "$name נכבה." }
-        'restart' { & $script:VBM controlvm $vm reset 2>&1 | Out-Null; $msg = "$name מופעל מחדש." }
+        'start'   {
+            if ((Get-VmState $vm) -eq 'running') { Update-VmRecord $name @{ stopped = $false }; $msg = "$name כבר דלוק."; break }
+            $o = (& $script:VBM startvm $vm --type headless 2>&1 | Out-String)
+            if ($o -match 'locked') { Start-Sleep 8; $o = (& $script:VBM startvm $vm --type headless 2>&1 | Out-String) }
+            if ((Get-VmState $vm) -eq 'running') { Update-VmRecord $name @{ stopped = $false }; $msg = "$name נדלק. עוד כדקה אפשר להתחבר." } else { $msg = "לא הצלחתי להדליק את $name (אולי הוא עוד נכבה – נסה שוב בעוד דקה)."; $kind = 'err' }
+        }
+        'stop'    {
+            Update-VmRecord $name @{ stopped = $true }
+            if ((Get-VmState $vm) -ne 'running') { $msg = "$name כבר כבוי."; break }
+            # in the background (the website keeps answering): Windows shutdown -> power button -> pull the plug
+            $bg = "`$v='$($script:VBM)'; `$n='$vm'; function St { ((& `$v showvminfo `$n --machinereadable) -match '^VMState=') -replace 'VMState=|`"','' }; " +
+                  "& `$v guestcontrol `$n run --exe 'C:\Windows\System32\shutdown.exe' --username '$($r.adminName)' --password '$($r.adminPassword)' --timeout 20000 -- shutdown.exe /s /t 0 /f 2>`$null; " +
+                  "for(`$i=0;`$i -lt 20 -and (St) -eq 'running';`$i++){Start-Sleep 2}; if((St) -eq 'running'){ & `$v controlvm `$n acpipowerbutton; for(`$i=0;`$i -lt 25 -and (St) -eq 'running';`$i++){Start-Sleep 2} }; " +
+                  "if((St) -eq 'running'){ & `$v controlvm `$n poweroff }"
+            $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bg))
+            Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $enc" -WindowStyle Hidden
+            $msg = "$name נכבה… (עד דקה וחצי). לחץ רענון כדי לראות."
+        }
+        'restart' {
+            if ((Get-VmState $vm) -ne 'running') { & $script:VBM startvm $vm --type headless 2>&1 | Out-Null; Update-VmRecord $name @{ stopped = $false }; $msg = "$name היה כבוי – הדלקתי אותו."; break }
+            $o = if (Has-Agent $r) { Guest $r 'shutdown /r /t 0 /f' } else { 'not installed or not ready' }
+            if ($o -match 'not installed or not ready|CreateSession') { & $script:VBM controlvm $vm reset 2>&1 | Out-Null }
+            $msg = "$name מופעל מחדש. עוד כדקה אפשר להתחבר."
+        }
         'delete' {
             & $script:VBM controlvm $vm poweroff 2>&1 | Out-Null; Start-Sleep -Seconds 3
             & $script:VBM unregistervm $vm --delete 2>&1 | Out-Null
@@ -368,13 +391,13 @@ function Admin-Action($ctx, $req) {
             if ($v -notmatch '^\d+$' -or [int]$v -lt 5) { $msg = 'נפח לא תקין.'; $kind = 'err'; break }
             $lim = [uint64]$v * 1GB
             $o = Guest $r "fsutil quota modify C: $([uint64]($lim * 0.9)) $lim $(CompName $name)\$($r.user)"
-            if ($o -match 'error|denied') { $msg = 'שינוי הנפח נכשל (המחשב דלוק?).'; $kind = 'err' } else { Update-VmRecord $name @{ diskGB = [int]$v }; $msg = "הנפח של $name עודכן ל-$v GB." }
+            if ($o -match 'not installed or not ready') { $msg = 'המחשב עוד עולה – נסה שוב בעוד דקה.'; $kind = 'err' } elseif ($o -match 'error|denied') { $msg = 'שינוי הנפח נכשל (המחשב דלוק?).'; $kind = 'err' } else { Update-VmRecord $name @{ diskGB = [int]$v }; $msg = "הנפח של $name עודכן ל-$v GB." }
         }
         'password' {
             if (-not (Has-Agent $r)) { $msg = 'המחשב הזה נוצר בגרסה ישנה – אי אפשר לשנות לו סיסמה.'; $kind = 'err'; break }
             $bad = Check-Password $v $r.user; if ($bad) { $msg = $bad; $kind = 'err'; break }
             $o = Guest $r "net user $($r.user) $v"
-            if ($o -notmatch 'successfully') { $msg = 'שינוי הסיסמה נכשל (המחשב דלוק?).'; $kind = 'err' } else { Update-VmRecord $name @{ password = $v }; $msg = "הסיסמה של $name שונתה ל: $v" }
+            if ($o -match 'not installed or not ready') { $msg = 'המחשב עוד עולה – נסה שוב בעוד דקה.'; $kind = 'err' } elseif ($o -notmatch 'successfully') { $msg = 'שינוי הסיסמה נכשל (המחשב דלוק?).'; $kind = 'err' } else { Update-VmRecord $name @{ password = $v }; $msg = "הסיסמה של $name שונתה ל: $v" }
         }
         'ram' {
             if ($v -notmatch '^\d+$' -or [int]$v -lt 2) { $msg = 'זיכרון לא תקין.'; $kind = 'err'; break }
@@ -383,6 +406,17 @@ function Admin-Action($ctx, $req) {
             & $script:VBM modifyvm $vm --memory ([int]$v * 1024) 2>&1 | Out-Null
             if ($was) { & $script:VBM startvm $vm --type headless 2>&1 | Out-Null }
             Update-VmRecord $name @{ ramGB = [int]$v }; $msg = "הזיכרון של $name עודכן ל-$v GB."
+        }
+        'usage' {
+            if (-not (Has-Agent $r)) { $msg = 'המחשב הזה נוצר בגרסה ישנה – אי אפשר לבדוק בו נפח.'; $kind = 'err'; break }
+            if ((Get-VmState $vm) -ne 'running') { $msg = "$name כבוי – הדלק אותו כדי לבדוק נפח."; $kind = 'err'; break }
+            $script:Usage.Remove($name)
+            $used = Get-UsageGB $r
+            if ($null -ne $used) { $msg = "$name משתמש ב-$used GB מתוך $($r.diskGB) GB." }
+            else { $o = Guest $r 'fsutil quota query C:'
+                   if ($o -match 'not installed or not ready') { $msg = 'המחשב עוד עולה – נסה שוב בעוד דקה.'; $kind = 'err' }
+                   elseif ($o -match 'VBoxManage.exe: error') { $msg = 'הבדיקה נכשלה. נסה שוב בעוד דקה.'; $kind = 'err' }
+                   else { $script:Usage[$name] = @{ gb = 0; at = Get-Date }; $msg = "$name משתמש ב-0 GB מתוך $($r.diskGB) GB." } }
         }
         default { $msg = 'פעולה לא מוכרת.'; $kind = 'err' }
     }

@@ -35,6 +35,11 @@ if ($ga) {
     Start-Service VBoxService -ErrorAction SilentlyContinue
 }
 
+# the power button / shutdown work even when nobody is logged in (Windows Server ignores them by default)
+Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name shutdownwithoutlogon -Value 1 -Type DWord
+New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Reliability' -Force | Out-Null
+Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Reliability' -Name ShutdownReasonOn -Value 0 -Type DWord
+
 # protection against password guessing from the internet
 Rename-LocalUser -Name 'Administrator' -NewName $cfg.adminName -ErrorAction SilentlyContinue   # bots always try "Administrator"
 & net.exe accounts /lockoutthreshold:10 /lockoutwindow:15 /lockoutduration:15 | Out-Null

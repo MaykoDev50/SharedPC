@@ -20,7 +20,7 @@ namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "4.0.0";
+        public const string Version = "4.1.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -172,6 +172,67 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             return Run(VBM, args, timeoutMs + 15000);
         }
         public static bool HasAgent(Dictionary<string, object> r) { return Store.S(r, "agent").ToLower() == "true"; }
+
+        // ---------- power (always returns a clear message; never leaves the computer half-way) ----------
+        static bool WaitState(string name, Func<string, bool> ok, int seconds)
+        {
+            for (int i = 0; i < seconds; i += 2) { if (ok(VmState(name))) return true; Thread.Sleep(2000); }
+            return ok(VmState(name));
+        }
+        static bool IsOff(string s) { return s == "poweroff" || s == "aborted" || s == "saved" || s == "missing"; }
+        public static string StartVm(string name)
+        {
+            var s = VmState(name);
+            if (s == "missing") return "❌ המחשב " + name + " לא נמצא ב-VirtualBox.";
+            if (s == "running") { Store.Set(name, "stopped", false); return "✅ " + name + " כבר דלוק."; }
+            if (!IsOff(s)) WaitState(name, IsOff, 60);   // still shutting down - wait for it
+            string o = "";
+            for (int t = 0; t < 3; t++)
+            {
+                o = VBox("startvm \"PC-" + name + "\" --type headless");
+                if (WaitState(name, x => x == "running", 20)) { Store.Set(name, "stopped", false); return "✅ " + name + " נדלק. עוד כדקה אפשר להתחבר."; }
+                Thread.Sleep(5000);   // "already locked by a session" right after a shutdown - try again
+            }
+            Log("start " + name + " failed: " + o.Trim());
+            return "❌ לא הצלחתי להדליק את " + name + ".\n\n" + o.Trim();
+        }
+        public static string StopVm(Dictionary<string, object> r)
+        {
+            var name = Store.S(r, "name"); var vm = "\"PC-" + name + "\"";
+            if (VmState(name) != "running") { Store.Set(name, "stopped", true); return "✅ " + name + " כבר כבוי."; }
+            Store.Set(name, "stopped", true);
+            // 1) ask Windows inside to shut down (works even when nobody is logged in)
+            if (HasAgent(r)) Guest(r, "shutdown /s /t 0 /f", 20000);
+            if (WaitState(name, IsOff, 40)) return "✅ " + name + " כבוי.";
+            // 2) the power button
+            VBox("controlvm " + vm + " acpipowerbutton");
+            if (WaitState(name, IsOff, 50)) return "✅ " + name + " כבוי.";
+            // 3) pull the plug
+            var o = VBox("controlvm " + vm + " poweroff");
+            if (WaitState(name, IsOff, 20)) return "✅ " + name + " כבוי (כיבוי בכוח – Windows לא הגיב).";
+            Log("stop " + name + " failed: " + o.Trim());
+            return "❌ לא הצלחתי לכבות את " + name + ".\n\n" + o.Trim();
+        }
+        public static string RestartVm(Dictionary<string, object> r)
+        {
+            var name = Store.S(r, "name");
+            if (VmState(name) != "running") return StartVm(name);
+            if (HasAgent(r) && GuestStarted(Guest(r, "shutdown /r /t 0 /f", 20000))) { Store.Set(name, "stopped", false); return "✅ " + name + " מופעל מחדש. עוד כדקה אפשר להתחבר."; }
+            var o = VBox("controlvm \"PC-" + name + "\" reset");
+            Store.Set(name, "stopped", false);
+            return o.Contains("error") ? "❌ ההפעלה מחדש נכשלה.\n\n" + o.Trim() : "✅ " + name + " מופעל מחדש. עוד כדקה אפשר להתחבר.";
+        }
+        // the command reached Windows inside (a reboot may cut the channel afterwards - that is fine)
+        public static bool GuestStarted(string output) { return !output.Contains("not installed or not ready") && !output.Contains("CreateSession") && !output.Contains("not running"); }
+        public static bool GuestOk(string output) { return output.IndexOf("VBoxManage.exe: error", StringComparison.OrdinalIgnoreCase) < 0; }
+        // turn a guestcontrol error into something a person understands
+        public static string GuestProblem(string output)
+        {
+            if (output.Contains("not installed or not ready")) return "המחשב עוד עולה ועדיין לא מוכן לפקודות.\nחכה דקה-שתיים (אחרי שהוא נדלק) ונסה שוב.";
+            if (output.Contains("not running") || output.Contains("is not currently running")) return "המחשב כבוי. הדלק אותו ונסה שוב.";
+            if (output.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0 || output.Contains("logon")) return "ערוץ הניהול לא מצליח להיכנס למחשב.\n\n" + output.Trim();
+            return output.Trim();
+        }
 
         public static string CompName(string vm)
         {
