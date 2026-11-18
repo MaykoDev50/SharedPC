@@ -513,7 +513,11 @@ namespace SharedPC
             foreach (var b in new[] { bStart, bStop, bRestart, bConnect }) b.Enabled = !busy && ready;
             bStart.Base = s == "running" ? T.Gray : T.Green; bStop.Base = s == "running" ? T.Red : T.Gray; bRestart.Base = s == "running" ? T.Card : T.Gray;
             foreach (var b in new[] { bStart, bStop, bRestart }) b.Invalidate();
-            agentNote.Text = App.HasAgent(r) ? "" : "⚠️ המחשב הזה נוצר בגרסה ישנה: שינוי נפח, סיסמה והרשאות לא זמין בו. מחשבים חדשים תומכים בכל ההגדרות.";
+            var stt = Store.S(r, "status");
+            agentNote.Text = App.HasAgent(r) ? "" :
+                stt == "failed" ? "⚠️ המחשב הזה לא סיים להיבנות. מחק אותו (🗑️ מחק למטה) וצור מחשב חדש." :
+                stt == "creating" ? "⏳ המחשב עוד נבנה – ההגדרות יהיו זמינות כשהוא יהיה מוכן." :
+                "⚠️ המחשב הזה נוצר בגרסה ישנה: שינוי נפח, סיסמה והרשאות לא זמין בו. מחשבים חדשים תומכים בכל ההגדרות.";
             Tuple<double, DateTime> u; var limit = Store.I(r, "diskGB");
             double real; var hasReal = driveSize.TryGetValue(selected, out real);
             var mismatch = hasReal && Math.Abs(real - limit) > 1 ? "   ⚠️ הכונן בפועל: " + real + " GB – לחץ \"שמור\" בנפח כדי להתאים" : "";
@@ -536,7 +540,14 @@ namespace SharedPC
         Dictionary<string, object> NeedAgent()
         {
             var r = Store.Get(selected); if (r == null) return null;
-            if (!App.HasAgent(r)) { App.Say("המחשב הזה נוצר בגרסה ישנה של התוכנה, ולכן אי אפשר לשנות בו את זה מכאן.\nאפשר ליצור אותו מחדש (מחשב חדש) – אז כל ההגדרות יעבדו."); return null; }
+            if (!App.HasAgent(r))
+            {
+                var st2 = Store.S(r, "status");
+                App.Say(st2 == "failed" ? "המחשב הזה לא סיים להיבנות, אז אי אפשר לשנות בו הגדרות.\nמחק אותו (🗑️ מחק) וצור מחשב חדש."
+                      : st2 == "creating" ? "המחשב עוד נבנה. חכה שיהיה מוכן (READY) ונסה שוב."
+                      : "המחשב הזה נוצר בגרסה ישנה של התוכנה, ולכן אי אפשר לשנות בו את זה מכאן.\nאפשר ליצור אותו מחדש (מחשב חדש) – אז כל ההגדרות יעבדו.");
+                return null;
+            }
             string s; states.TryGetValue(selected, out s);
             if (s != "running") { App.Say("המחשב צריך להיות דלוק כדי לשנות את זה. הפעל אותו ונסה שוב."); return null; }
             return r;

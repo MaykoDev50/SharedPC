@@ -14,13 +14,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("4.8.0.0")]
+[assembly: AssemblyVersion("4.8.1.0")]
 
 namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "4.8.0";
+        public const string Version = "4.8.1";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
