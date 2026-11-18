@@ -179,7 +179,7 @@ namespace SharedPC
         // details
         Panel details = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = T.Bg, Padding = new Padding(20, 6, 20, 20) };
         Label dName = T.Lbl("", 22, true, T.Text), dState = T.Lbl("", 10.5f, true, T.Muted), dMeta = T.Lbl("", 9.5f);
-        Label cAddr = T.Lbl("", 13, true, T.Text), cUser = T.Lbl("", 13, true, T.Text), cPass = T.Lbl("", 13, true, T.Text);
+        Label cHome = T.Lbl("", 13, true, T.Text), cAddr = T.Lbl("", 13, true, T.Text), cUser = T.Lbl("", 13, true, T.Text), cPass = T.Lbl("", 13, true, T.Text);
         Bar usageBar = new Bar { Width = 560 }; Label usageLbl = T.Lbl("", 10, false, T.Muted);
         NumericUpDown gbNum = T.Num(App.MinDiskGB, 2000, 50), ramNum = T.Num(2, 64, 4);
         TextBox pwBox = T.Box(250); CheckBox adminChk = new CheckBox { Text = "הרשאות מנהל (התקנת תוכנות)", AutoSize = true, ForeColor = T.Text, Font = T.F(10.5f), BackColor = Color.Transparent };
@@ -310,22 +310,24 @@ namespace SharedPC
             top.Controls.Add(nameBox); top.Controls.Add(qaWrap);
 
             // connection details
-            var conn = Section("🔗  פרטי חיבור ללקוח", 210);
-            Place(conn, T.Lbl("כתובת (חיבור לשולחן עבודה מרוחק)", 9.5f), 18, 50); Place(conn, cAddr, 18, 70);
-            Place(conn, T.Lbl("שם משתמש", 9.5f), 18, 104); Place(conn, cUser, 18, 124);
-            Place(conn, T.Lbl("סיסמה", 9.5f), 18, 158); Place(conn, cPass, 18, 176);
+            var conn = Section("🔗  פרטי חיבור", 264);
+            Place(conn, T.Lbl("🌍 כתובת ללקוח – מחוץ לבית (חיבור לשולחן עבודה מרוחק)", 9.5f), 18, 50); Place(conn, cAddr, 18, 70);
+            Place(conn, T.Lbl("🏠 כתובת בתוך הבית – מהמחשב הזה או מכל מכשיר ברשת הביתית (הכתובת החיצונית לא עובדת מתוך הבית)", 9.5f, false, T.Yellow), 18, 104); Place(conn, cHome, 18, 124);
+            Place(conn, T.Lbl("שם משתמש", 9.5f), 18, 158); Place(conn, cUser, 18, 178);
+            Place(conn, T.Lbl("סיסמה", 9.5f), 18, 212); Place(conn, cPass, 18, 230);
             var copyAll = new Btn("📋  העתק הכל", T.Accent, 150, 40); copyAll.Click += (s, e) => CopyAll();
             var copyAddr = new Btn("העתק", T.Card, 74, 30); copyAddr.Font = T.F(9, true); copyAddr.Click += (s, e) => CopyText(cAddr.Text);
+            var copyHome = new Btn("העתק", T.Card, 74, 30); copyHome.Font = T.F(9, true); copyHome.Click += (s, e) => CopyText(cHome.Text);
             var copyUser = new Btn("העתק", T.Card, 74, 30); copyUser.Font = T.F(9, true); copyUser.Click += (s, e) => CopyText(cUser.Text);
             var showPw = new Btn("👁  הצג", T.Card, 74, 30); showPw.Font = T.F(9, true); showPw.Click += (s, e) => { passShown = !passShown; ShowSelected(); };
             var copyPw = new Btn("העתק", T.Card, 74, 30); copyPw.Font = T.F(9, true); copyPw.Click += (s, e) => { var r = Store.Get(selected); if (r != null) CopyText(Store.S(r, "password")); };
             conn.Resize += (s, e) =>
             {
                 int w = conn.Width; copyAll.Location = new Point(w - 170, 14);
-                copyAddr.Location = new Point(w - 94, 68); copyUser.Location = new Point(w - 94, 122);
-                copyPw.Location = new Point(w - 94, 172); showPw.Location = new Point(w - 174, 172);
+                copyAddr.Location = new Point(w - 94, 68); copyHome.Location = new Point(w - 94, 122); copyUser.Location = new Point(w - 94, 176);
+                copyPw.Location = new Point(w - 94, 226); showPw.Location = new Point(w - 174, 226);
             };
-            conn.Controls.AddRange(new Control[] { copyAll, copyAddr, copyUser, showPw, copyPw });
+            conn.Controls.AddRange(new Control[] { copyAll, copyAddr, copyHome, copyUser, showPw, copyPw });
 
             // usage
             var use = Section("💾  נפח אחסון", 120);
@@ -477,6 +479,7 @@ namespace SharedPC
             dName.Text = selected; dState.Text = "●  " + StateText(r, s); dState.ForeColor = StateColor(r, s);
             dMeta.Text = "נוצר: " + Store.S(r, "created").Replace("T", " ") + "     ·     זיכרון: " + Store.S(r, "ramGB") + " GB     ·     פורט: " + Store.S(r, "port");
             cAddr.Text = publicIp + ":" + Store.S(r, "port");
+            cHome.Text = lanIp + ":" + Store.S(r, "port");
             cUser.Text = App.FullUser(r);
             cPass.Text = passShown ? Store.S(r, "password") : "••••••••••";
             var ready = Store.S(r, "status") == "ready";
