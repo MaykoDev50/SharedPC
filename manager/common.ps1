@@ -4,9 +4,19 @@ $script:VmsFile = 'C:\SharedPC-Host\vms.json'
 
 function VBox {
     $ErrorActionPreference = 'Continue'
-    $out = & $script:VBM @args 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { throw "VBoxManage $($args[0]) failed: $($out.Trim())" }
-    $out
+    for ($try = 1; ; $try++) {
+        $out = & $script:VBM @args 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0) { return $out }
+        # "Failed to create the VirtualBox object": VirtualBox's background service is stuck or was started
+        # without admin rights (e.g. right after installing VirtualBox). Restart it - only if no computer runs.
+        if ($try -le 4 -and $out -match 'Failed to create the VirtualBox object|VBoxSVC|E_ACCESSDENIED|CO_E_SERVER_EXEC_FAILURE|0x80070005|0x80080005|is not ready') {
+            if (-not (Get-Process VBoxHeadless, VirtualBoxVM -ErrorAction SilentlyContinue)) {
+                Get-Process VirtualBox, VBoxSVC, VBoxSDS -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Seconds (5 * $try); continue
+        }
+        throw "VBoxManage $($args[0]) failed: $($out.Trim())"
+    }
 }
 
 function New-RandomPassword([int]$groups = 4) {

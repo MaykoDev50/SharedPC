@@ -14,13 +14,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("4.7.0.0")]
+[assembly: AssemblyVersion("4.8.0.0")]
 
 namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "4.7.0";
+        public const string Version = "4.8.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -182,7 +182,18 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                 return o.Result + e.Result;
             }
         }
-        public static string VBox(string args) { return Run(VBM, args); }
+        public static string VBox(string args)
+        {
+            for (int t = 1; ; t++)
+            {
+                var o = Run(VBM, args);
+                // VirtualBox's background service stuck / started without admin rights (typical right after installing it)
+                if (t > 3 || !Regex.IsMatch(o, "Failed to create the VirtualBox object|E_ACCESSDENIED|CO_E_SERVER_EXEC_FAILURE|0x80070005|0x80080005")) return o;
+                if (Process.GetProcessesByName("VBoxHeadless").Length == 0 && Process.GetProcessesByName("VirtualBoxVM").Length == 0)
+                    foreach (var n in new[] { "VirtualBox", "VBoxSVC", "VBoxSDS" }) foreach (var p in Process.GetProcessesByName(n)) try { p.Kill(); } catch { }
+                Thread.Sleep(4000 * t);
+            }
+        }
         public static string AdminPassword()
         {
             var f = Path.Combine(HostDir, "admin-password.txt");
