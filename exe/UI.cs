@@ -571,7 +571,12 @@ namespace SharedPC
         {
             var r = NeedAgent(); if (r == null) return;
             var pw = pwBox.Text.Trim(); var bad = App.CheckPassword(pw, Store.S(r, "user")); if (bad != null) { App.Say(bad); return; }
-            Busy("משנה סיסמה", () => App.Guest(r, "net user " + Store.S(r, "user") + " " + pw), o =>
+            Busy("משנה סיסמה", () =>
+            {
+                var res = App.Guest(r, "net user " + Store.S(r, "user") + " " + pw);
+                if (res.Contains("successfully")) App.Log("login check " + Store.S(r, "name") + ":\r\n" + App.GuestPs(r, App.RepairLoginScript(Store.S(r, "user")), 60000).Trim());
+                return res;
+            }, o =>
             {
                 App.Log("password " + selected + ": " + o.Trim());
                 if (!o.Contains("successfully") && !o.Contains("בהצלחה")) { App.Say("השינוי נכשל:\n" + App.GuestProblem(o), MessageBoxIcon.Warning); return; }

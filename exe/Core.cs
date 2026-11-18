@@ -14,13 +14,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("4.5.0.0")]
+[assembly: AssemblyVersion("4.6.0.0")]
 
 namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "4.5.0";
+        public const string Version = "4.6.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -282,6 +282,19 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             Store.Set(name, "wallpaper", WallpaperHash());
             Log("wallpaper applied to " + name);
             return "OK";
+        }
+        // makes sure the person can sign in over Remote Desktop, and reports why the last sign-ins failed
+        public static string RepairLoginScript(string user)
+        {
+            return "$u='" + user + "'; 'HOST=' + $env:COMPUTERNAME; " +
+                   "$a=[ADSI]\"WinNT://./$u,user\"; 'LOCKED=' + $a.IsAccountLocked; 'FLAGS=' + $a.UserFlags.Value; " +
+                   "if ($a.IsAccountLocked) { $a.IsAccountLocked = $false; $a.SetInfo() }; " +
+                   "net user $u /active:yes /passwordchg:yes | Out-Null; " +
+                   "Add-LocalGroupMember -SID 'S-1-5-32-555' -Member $u -ErrorAction SilentlyContinue; " +
+                   "'RDPUSERS=' + ((Get-LocalGroupMember -SID 'S-1-5-32-555' | ForEach-Object Name) -join ','); " +
+                   "Get-WinEvent -FilterHashtable @{LogName='Security';Id=4625} -MaxEvents 4 -ErrorAction SilentlyContinue | ForEach-Object { " +
+                   "$x=[xml]$_.ToXml(); $d=@{}; $x.Event.EventData.Data | ForEach-Object { $d[$_.Name]=$_.'#text' }; " +
+                   "'FAIL ' + $_.TimeCreated.ToString('HH:mm:ss') + ' ' + $d.TargetDomainName + '\\' + $d.TargetUserName + ' status=' + $d.Status + ' sub=' + $d.SubStatus + ' type=' + $d.LogonType + ' from=' + $d.IpAddress }";
         }
         public static bool HasAgent(Dictionary<string, object> r) { return Store.S(r, "agent").ToLower() == "true"; }
 
