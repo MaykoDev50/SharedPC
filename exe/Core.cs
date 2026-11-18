@@ -14,13 +14,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Manager")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("4.0.0.0")]
+[assembly: AssemblyVersion("4.4.0.0")]
 
 namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "4.3.0";
+        public const string Version = "4.4.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -50,6 +50,7 @@ namespace SharedPC
             {
                 Directory.CreateDirectory(ScriptDir);
                 Log("Manager " + Version + " started (admin)");
+                if (SelfUpdate()) return;   // a newer version was downloaded and started instead of this one
                 // first time on this computer: install VirtualBox + download Windows Server automatically
                 if (!File.Exists(VBM) || !File.Exists(Iso) || new FileInfo(Iso).Length < 3L * 1024 * 1024 * 1024)
                 {
@@ -82,6 +83,44 @@ namespace SharedPC
         public static bool Ask(string text)
         {
             return MessageBox.Show(text, "SharedPC", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2, MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign) == DialogResult.Yes;
+        }
+
+        // ---------- self-update: the program replaces itself with the newest version from GitHub ----------
+        const string ExeUrl = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/exe/";
+        public static string LatestVersion()
+        {
+            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
+            using (var wc = new WebClient()) { wc.Headers.Add("Cache-Control", "no-cache"); return wc.DownloadString(ExeUrl + "manager-version.txt?t=" + DateTime.UtcNow.Ticks).Trim(); }
+        }
+        public static bool NewerAvailable(out string latest)
+        {
+            latest = ""; try { latest = LatestVersion(); return new System.Version(latest) > new System.Version(Version); } catch { return false; }
+        }
+        // downloads the new program next to this one, swaps them and starts the new one. true = caller must exit.
+        public static bool SelfUpdate()
+        {
+            var exe = Application.ExecutablePath;
+            try { File.Delete(exe + ".old"); } catch { }
+            string latest; if (!NewerAvailable(out latest)) return false;
+            try
+            {
+                var tmp = exe + ".new";
+                using (var wc = new WebClient()) wc.DownloadFile(ExeUrl + "SharedPC-Manager.exe?t=" + DateTime.UtcNow.Ticks, tmp);
+                var bytes = File.ReadAllBytes(tmp);
+                if (bytes.Length < 100000 || bytes[0] != 'M' || bytes[1] != 'Z') { File.Delete(tmp); Log("update: bad download"); return false; }
+                if (AssemblyName.GetAssemblyName(tmp).Version < new System.Version(latest)) { File.Delete(tmp); Log("update: downloaded file is older (GitHub cache) - later"); return false; }
+                File.Move(exe, exe + ".old");          // a running program can be renamed, not overwritten
+                File.Move(tmp, exe);
+                Log("updated " + Version + " -> " + latest);
+                Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log("update failed: " + ex.Message);
+                try { if (!File.Exists(exe) && File.Exists(exe + ".old")) File.Move(exe + ".old", exe); } catch { }
+                return false;
+            }
         }
 
         // ---------- startup chores ----------

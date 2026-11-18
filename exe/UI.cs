@@ -244,6 +244,19 @@ namespace SharedPC
 
             timer.Tick += (s, e) => Reload();
             Shown += (s, e) => { Reload(); timer.Start(); FetchPublicIp(); };
+            // while open: look for a new version every 2 hours
+            var upd = new System.Windows.Forms.Timer { Interval = 2 * 60 * 60 * 1000 }; bool asked = false;
+            upd.Tick += (s, e) => Task.Run(() => { string v; return App.NewerAvailable(out v) ? v : null; }).ContinueWith(t =>
+            {
+                if (t.Result == null || asked || !IsHandleCreated) return;
+                BeginInvoke((Action)(() =>
+                {
+                    asked = true;
+                    if (App.Ask("יש גרסה חדשה של התוכנה (" + t.Result + ").\nלעדכן עכשיו? התוכנה תיסגר ותיפתח מחדש תוך כמה שניות.\n(המחשבים של הלקוחות ממשיכים לעבוד כרגיל)"))
+                    { if (App.SelfUpdate()) Application.Exit(); else App.Say("העדכון לא הצליח עכשיו – הוא ינסה שוב בפתיחה הבאה."); }
+                }));
+            });
+            upd.Start();
             KeyPreview = true;
             KeyDown += (s, e) => { if (e.Control && e.KeyCode == Keys.N) NewComputer(); if (e.KeyCode == Keys.F5) Reload(); };
         }

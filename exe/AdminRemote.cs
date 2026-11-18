@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("SharedPC Admin")]
 [assembly: AssemblyProduct("SharedPC")]
-[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
 
 namespace SharedPCAdmin
 {
@@ -23,12 +23,34 @@ namespace SharedPCAdmin
         static readonly Color Bg = Color.FromArgb(11, 15, 25), Card = Color.FromArgb(26, 34, 53), Text = Color.FromArgb(236, 240, 247),
             Muted = Color.FromArgb(143, 155, 179), Accent = Color.FromArgb(99, 102, 241), Green = Color.FromArgb(34, 197, 94), Red = Color.FromArgb(239, 68, 68);
 
+        // replaces itself with the newest version from GitHub (no need to send a new file)
+        static bool SelfUpdate()
+        {
+            const string url = "https://raw.githubusercontent.com/MaykoDev50/SharedPC/main/exe/";
+            var exe = Application.ExecutablePath;
+            try { File.Delete(exe + ".old"); } catch { }
+            try
+            {
+                string latest;
+                using (var wc = new WebClient()) latest = wc.DownloadString(url + "admin-version.txt?t=" + DateTime.UtcNow.Ticks).Trim();
+                var mine = Assembly.GetExecutingAssembly().GetName().Version;
+                if (new Version(latest) <= mine) return false;
+                var tmp = exe + ".new";
+                using (var wc = new WebClient()) wc.DownloadFile(url + "SharedPC-Admin.exe?t=" + DateTime.UtcNow.Ticks, tmp);
+                if (new FileInfo(tmp).Length < 10000 || AssemblyName.GetAssemblyName(tmp).Version < new Version(latest)) { File.Delete(tmp); return false; }
+                File.Move(exe, exe + ".old"); File.Move(tmp, exe);
+                Process.Start(exe); return true;
+            }
+            catch { try { if (!File.Exists(exe) && File.Exists(exe + ".old")) File.Move(exe + ".old", exe); } catch { } return false; }
+        }
+
         [STAThread]
         static void Main()
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
+            if (SelfUpdate()) return;
 
             var f = new Form
             {
