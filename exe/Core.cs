@@ -20,7 +20,7 @@ namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "4.2.0";
+        public const string Version = "4.3.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -208,6 +208,41 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
                 case "MAX": return "❌ אי אפשר להגדיל ל-" + gb + " GB. הכי גדול שאפשר: " + m.Groups[2].Value.Trim() + " GB.";
                 default: return "❌ השינוי נכשל:\n" + m.Groups[2].Value.Trim();
             }
+        }
+        // ---------- desktop picture for all computers ----------
+        public static readonly string WallpaperFile = Path.Combine(HostDir, "wallpaper.jpg");
+        public static string WallpaperHash()
+        {
+            if (!File.Exists(WallpaperFile)) return "";
+            using (var md5 = System.Security.Cryptography.MD5.Create()) return BitConverter.ToString(md5.ComputeHash(File.ReadAllBytes(WallpaperFile))).Replace("-", "").Substring(0, 12);
+        }
+        const string WallpaperSetup =
+            "New-Item 'C:\\SharedPC' -ItemType Directory -Force | Out-Null; " +
+            "$cmd = \"@echo off`r`nreg add `\"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System`\" /v Wallpaper /t REG_SZ /d `\"C:\\SharedPC\\wallpaper.jpg`\" /f >nul`r`n\" + " +
+            "\"reg add `\"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System`\" /v WallpaperStyle /t REG_SZ /d 4 /f >nul`r`n\" + " +
+            "\"reg add `\"HKCU\\Control Panel\\Desktop`\" /v Wallpaper /t REG_SZ /d `\"C:\\SharedPC\\wallpaper.jpg`\" /f >nul`r`n\" + " +
+            "\"reg add `\"HKCU\\Control Panel\\Desktop`\" /v WallpaperStyle /t REG_SZ /d 10 /f >nul`r`n\" + " +
+            "\"RUNDLL32.EXE user32.dll,UpdatePerUserSystemParameters 1, True`r`n\"; " +
+            "Set-Content 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp\\sharedpc-wallpaper.cmd' $cmd -Encoding ASCII; " +
+            "$pz = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization'; New-Item $pz -Force | Out-Null; " +
+            "Set-ItemProperty $pz -Name LockScreenImage -Value 'C:\\SharedPC\\wallpaper.jpg'; Set-ItemProperty $pz -Name NoChangingLockScreen -Value 1 -Type DWord; " +
+            "$ts = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services'; New-Item $ts -Force -ErrorAction SilentlyContinue | Out-Null; " +
+            "Set-ItemProperty $ts -Name fNoRemoteDesktopWallpaper -Value 0 -Type DWord; 'WALLPAPER-OK'";
+        // copy the picture into one computer and make it the desktop + lock screen for every user there
+        public static string ApplyWallpaper(Dictionary<string, object> r)
+        {
+            if (!File.Exists(WallpaperFile)) return "no picture";
+            var name = Store.S(r, "name");
+            var o = GuestPs(r, "New-Item 'C:\\SharedPC' -ItemType Directory -Force | Out-Null; 'DIR-OK'", 60000);
+            if (!o.Contains("DIR-OK")) return o;
+            o = Run(VBM, "guestcontrol \"PC-" + name + "\" copyto --username \"" + Store.S(r, "adminName") + "\" --password \"" + Store.S(r, "adminPassword") +
+                         "\" \"" + WallpaperFile + "\" \"C:\\SharedPC\\wallpaper.jpg\"", 120000);
+            if (!GuestOk(o)) return o;
+            o = GuestPs(r, WallpaperSetup, 60000);
+            if (!o.Contains("WALLPAPER-OK")) return o;
+            Store.Set(name, "wallpaper", WallpaperHash());
+            Log("wallpaper applied to " + name);
+            return "OK";
         }
         public static bool HasAgent(Dictionary<string, object> r) { return Store.S(r, "agent").ToLower() == "true"; }
 

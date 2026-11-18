@@ -193,7 +193,8 @@ namespace SharedPC
         Dictionary<string, string> states = new Dictionary<string, string>();
         Dictionary<string, string> working = new Dictionary<string, string>();   // name -> "starting"/"stopping" while a power action runs
         Dictionary<string, Tuple<double, DateTime>> usage = new Dictionary<string, Tuple<double, DateTime>>();
-        Dictionary<string, double> driveSize = new Dictionary<string, double>();   // real size of C: inside
+        Dictionary<string, double> driveSize = new Dictionary<string, double>();
+        Dictionary<string, DateTime> wpTried = new Dictionary<string, DateTime>();   // desktop picture: last attempt per computer   // real size of C: inside
         System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 8000 };
         bool loading; string lastPorts; DateTime lastSync = DateTime.MinValue;
 
@@ -227,7 +228,9 @@ namespace SharedPC
                 Clipboard.SetText(txt);
                 App.Say(txt + "\n\n✅ הועתק. שלח לשותף יחד עם התוכנה SharedPC-Admin.\nמי שיש לו את הסיסמה הזו יכול ליצור ולמחוק מחשבים – אל תשלח אותה ללקוחות.");
             };
-            siteRow.Controls.AddRange(new Control[] { siteLbl, copySite, openSite, remote });
+            var wall = new Btn("🖼️ תמונת רקע", T.Card, 120, 28); wall.Font = T.F(9, true);
+            wall.Click += (s, e) => PickWallpaper();
+            siteRow.Controls.AddRange(new Control[] { siteLbl, copySite, openSite, remote, wall });
             header.Controls.Add(siteRow); header.Controls.Add(routerLbl); header.Controls.Add(chipRow); header.Controls.Add(titleRow);
 
             // ---------- list (right side) ----------
@@ -243,6 +246,29 @@ namespace SharedPC
             Shown += (s, e) => { Reload(); timer.Start(); FetchPublicIp(); };
             KeyPreview = true;
             KeyDown += (s, e) => { if (e.Control && e.KeyCode == Keys.N) NewComputer(); if (e.KeyCode == Keys.F5) Reload(); };
+        }
+
+        void PickWallpaper()
+        {
+            using (var d = new OpenFileDialog { Title = "תמונת רקע לכל המחשבים", Filter = "תמונות|*.jpg;*.jpeg;*.png;*.bmp;*.webp|הכל|*.*" })
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    using (var img = Image.FromFile(d.FileName))
+                    using (var bmp = new Bitmap(img.Width, img.Height))
+                    {
+                        using (var g = Graphics.FromImage(bmp)) { g.Clear(Color.Black); g.DrawImage(img, 0, 0, img.Width, img.Height); }
+                        bmp.Save(App.WallpaperFile + ".tmp", System.Drawing.Imaging.ImageFormat.Jpeg);
+                    }
+                    if (File.Exists(App.WallpaperFile)) File.Delete(App.WallpaperFile);
+                    File.Move(App.WallpaperFile + ".tmp", App.WallpaperFile);
+                }
+                catch (Exception ex) { App.Say("לא הצלחתי לפתוח את התמונה:\n" + ex.Message); return; }
+                lock (wpTried) wpTried.Clear();
+                Reload();
+                App.Say("✅ התמונה נשמרה.\nתוך דקה היא תיכנס לכל המחשבים הדלוקים (וגם לכל מחשב חדש ולכל מחשב שיידלק).\nהלקוחות יראו אותה מהכניסה הבאה שלהם – וגם אם מישהו מחליף אותה, בכניסה הבאה היא חוזרת.");
+            }
         }
 
         // ---------- details panel ----------
@@ -346,6 +372,16 @@ namespace SharedPC
                     var n = Store.S(r, "name"); var s = App.VmState(n); st[n] = s;
                     if (s == "running") { running++; ramOn += Store.I(r, "ramGB"); }
                 }
+                // desktop picture: push it into every running computer that doesn't have the current one yet
+                var wp = App.WallpaperHash();
+                if (wp != "")
+                    foreach (var r in recs)
+                    {
+                        var n = Store.S(r, "name"); DateTime last;
+                        if (Store.S(r, "status") != "ready" || !App.HasAgent(r) || st[n] != "running" || Store.S(r, "wallpaper") == wp) continue;
+                        lock (wpTried) { if (wpTried.TryGetValue(n, out last) && (DateTime.Now - last).TotalMinutes < 3) continue; wpTried[n] = DateTime.Now; }
+                        var rec = r; Task.Run(() => { var res = App.ApplyWallpaper(rec); if (res != "OK") App.Log("wallpaper " + Store.S(rec, "name") + ": " + res.Trim()); });
+                    }
                 var ready = recs.Where(r => Store.S(r, "status") == "ready").Select(r => Store.I(r, "port")).Where(p => p > 0).ToList(); ready.Add(App.WebPort);
                 var key = string.Join(",", ready.OrderBy(p => p));
                 if (publicIp != "…" && (key != lastPorts || (DateTime.Now - lastSync).TotalMinutes > 10))
@@ -594,7 +630,7 @@ namespace SharedPC
             App.Run("cmdkey.exe", "/delete:TERMSRV/127.0.0.2");
             var dir = Path.Combine(App.HostDir, "vms", selected); Directory.CreateDirectory(dir);
             var rdp = Path.Combine(dir, selected + ".rdp");
-            File.WriteAllText(rdp, "full address:s:127.0.0.2:" + Store.S(r, "port") + "\r\nusername:s:" + App.FullUser(r) + "\r\nprompt for credentials:i:1\r\nauthentication level:i:0\r\nscreen mode id:i:2\r\n", Encoding.ASCII);
+            File.WriteAllText(rdp, "full address:s:127.0.0.2:" + Store.S(r, "port") + "\r\nusername:s:" + App.FullUser(r) + "\r\nprompt for credentials:i:1\r\nauthentication level:i:0\r\nscreen mode id:i:2\r\ndisable wallpaper:i:0\r\nconnection type:i:6\r\nnetworkautodetect:i:0\r\n", Encoding.ASCII);
             Clipboard.SetText(Store.S(r, "password"));
             Process.Start("mstsc.exe", "\"" + rdp + "\"");
             App.Say("נפתח חלון התחברות.\nשם המשתמש: " + App.FullUser(r) + "\nהסיסמה הועתקה – הדבק (Ctrl+V) ולחץ אישור.");

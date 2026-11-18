@@ -37,6 +37,22 @@ Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Syste
 New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Reliability' -Force | Out-Null
 Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Reliability' -Name ShutdownReasonOn -Value 0 -Type DWord
 
+# desktop + lock-screen picture for everyone (re-applied at every sign-in, so it always stays)
+if (Test-Path 'C:\Setup-Client\wallpaper.jpg') {
+    New-Item 'C:\SharedPC' -ItemType Directory -Force | Out-Null
+    Copy-Item 'C:\Setup-Client\wallpaper.jpg' 'C:\SharedPC\wallpaper.jpg' -Force
+    $cmd = "@echo off`r`nreg add `"HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System`" /v Wallpaper /t REG_SZ /d `"C:\SharedPC\wallpaper.jpg`" /f >nul`r`n" +
+           "reg add `"HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System`" /v WallpaperStyle /t REG_SZ /d 4 /f >nul`r`n" +
+           "reg add `"HKCU\Control Panel\Desktop`" /v Wallpaper /t REG_SZ /d `"C:\SharedPC\wallpaper.jpg`" /f >nul`r`n" +
+           "reg add `"HKCU\Control Panel\Desktop`" /v WallpaperStyle /t REG_SZ /d 10 /f >nul`r`n" +
+           "RUNDLL32.EXE user32.dll,UpdatePerUserSystemParameters 1, True`r`n"
+    Set-Content 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\sharedpc-wallpaper.cmd' $cmd -Encoding ASCII
+    $pz = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'; New-Item $pz -Force | Out-Null
+    Set-ItemProperty $pz -Name LockScreenImage -Value 'C:\SharedPC\wallpaper.jpg'
+    Set-ItemProperty $pz -Name NoChangingLockScreen -Value 1 -Type DWord
+    Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name fNoRemoteDesktopWallpaper -Value 0 -Type DWord
+}
+
 # protection against password guessing from the internet
 Rename-LocalUser -Name 'Administrator' -NewName $cfg.adminName -ErrorAction SilentlyContinue   # bots always try "Administrator"
 & net.exe accounts /lockoutthreshold:10 /lockoutwindow:15 /lockoutduration:15 | Out-Null

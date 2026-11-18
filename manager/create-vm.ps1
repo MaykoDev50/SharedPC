@@ -118,6 +118,7 @@ try {
     @{ user = $User; password = $Password; admin = [bool]$Admin; adminName = $AdminName; diskGB = $DiskGB } | ConvertTo-Json |
         Set-Content "${W}:\Setup-Client\client.json" -Encoding UTF8
     Copy-Item (Join-Path $PSScriptRoot 'setup-client.ps1') "${W}:\Setup-Client\setup-client.ps1" -Force
+    if (Test-Path 'C:\SharedPC-Host\wallpaper.jpg') { Copy-Item 'C:\SharedPC-Host\wallpaper.jpg' "${W}:\Setup-Client\wallpaper.jpg" -Force }
     New-Item -ItemType Directory -Path "${W}:\Windows\Setup\Scripts" -Force | Out-Null
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Setup-Client\setup-client.ps1`r`n" |
         Set-Content "${W}:\Windows\Setup\Scripts\SetupComplete.cmd" -Encoding ASCII

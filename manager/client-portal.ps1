@@ -240,7 +240,7 @@ function Handle($ctx) {
         '/connect.rdp' {
             $rdp = @("full address:s:$(Get-PublicIp):$($r.port)", "username:s:$(CompName $r.name)\$($r.user)", 'screen mode id:i:2', 'use multimon:i:0',
                      'session bpp:i:32', 'dynamic resolution:i:1', 'smart sizing:i:1', 'audiomode:i:0', 'redirectclipboard:i:1',
-                     'autoreconnection enabled:i:1', 'authentication level:i:2', 'prompt for credentials:i:1') -join "`r`n"
+                     'autoreconnection enabled:i:1', 'disable wallpaper:i:0', 'connection type:i:6', 'networkautodetect:i:0', 'authentication level:i:2', 'prompt for credentials:i:1') -join "`r`n"
             Send $ctx 200 $rdp 'application/x-rdp' @{ 'Content-Disposition' = "attachment; filename=`"$($r.name).rdp`"" }; return
         }
         '/start' {
