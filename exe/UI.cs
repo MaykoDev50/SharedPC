@@ -181,7 +181,7 @@ namespace SharedPC
         Label dName = T.Lbl("", 22, true, T.Text), dState = T.Lbl("", 10.5f, true, T.Muted), dMeta = T.Lbl("", 9.5f);
         Label cAddr = T.Lbl("", 13, true, T.Text), cUser = T.Lbl("", 13, true, T.Text), cPass = T.Lbl("", 13, true, T.Text);
         Bar usageBar = new Bar { Width = 560 }; Label usageLbl = T.Lbl("", 10, false, T.Muted);
-        NumericUpDown gbNum = T.Num(5, 2000, 50), ramNum = T.Num(2, 64, 4);
+        NumericUpDown gbNum = T.Num(App.MinDiskGB, 2000, 50), ramNum = T.Num(2, 64, 4);
         TextBox pwBox = T.Box(250); CheckBox adminChk = new CheckBox { Text = "הרשאות מנהל (התקנת תוכנות)", AutoSize = true, ForeColor = T.Text, Font = T.F(10.5f), BackColor = Color.Transparent };
         Label agentNote = T.Lbl("", 9.5f, false, T.Yellow);
         Btn bStart, bStop, bRestart, bConnect;
@@ -193,6 +193,7 @@ namespace SharedPC
         Dictionary<string, string> states = new Dictionary<string, string>();
         Dictionary<string, string> working = new Dictionary<string, string>();   // name -> "starting"/"stopping" while a power action runs
         Dictionary<string, Tuple<double, DateTime>> usage = new Dictionary<string, Tuple<double, DateTime>>();
+        Dictionary<string, double> driveSize = new Dictionary<string, double>();   // real size of C: inside
         System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 8000 };
         bool loading; string lastPorts; DateTime lastSync = DateTime.MinValue;
 
@@ -296,7 +297,7 @@ namespace SharedPC
 
             // settings
             var set = Section("⚙️  הגדרות", 250);
-            Place(set, T.Lbl("נפח לקבצים (GB)", 10), 18, 54); Place(set, gbNum, 18, 78);
+            Place(set, T.Lbl("כונן C: (GB, כולל Windows)", 10), 18, 54); Place(set, gbNum, 18, 78);
             var saveGb = new Btn("שמור", T.Accent, 80, 32); saveGb.Font = T.F(9.5f, true); Place(set, saveGb, 136, 76); saveGb.Click += (s, e) => SaveGb();
             Place(set, T.Lbl("זיכרון RAM (GB)", 10), 250, 54); Place(set, ramNum, 250, 78);
             var saveRam = new Btn("שמור", T.Accent, 80, 32); saveRam.Font = T.F(9.5f, true); Place(set, saveRam, 368, 76); saveRam.Click += (s, e) => SaveRam();
@@ -437,8 +438,10 @@ namespace SharedPC
             foreach (var b in new[] { bStart, bStop, bRestart }) b.Invalidate();
             agentNote.Text = App.HasAgent(r) ? "" : "⚠️ המחשב הזה נוצר בגרסה ישנה: שינוי נפח, סיסמה והרשאות לא זמין בו. מחשבים חדשים תומכים בכל ההגדרות.";
             Tuple<double, DateTime> u; var limit = Store.I(r, "diskGB");
-            if (usage.TryGetValue(selected, out u)) { usageBar.Value = u.Item1; usageBar.Max = limit; usageLbl.Text = "בשימוש " + u.Item1.ToString("0.0") + " GB מתוך " + limit + " GB   (נבדק " + u.Item2.ToString("HH:mm") + ")"; }
-            else { usageBar.Value = 0; usageBar.Max = limit; usageLbl.Text = App.HasAgent(r) ? "מגבלה: " + limit + " GB · לחץ \"בדוק\" כדי לראות כמה בשימוש" : "מגבלה: " + limit + " GB"; }
+            double real; var hasReal = driveSize.TryGetValue(selected, out real);
+            var mismatch = hasReal && Math.Abs(real - limit) > 1 ? "   ⚠️ הכונן בפועל: " + real + " GB – לחץ \"שמור\" בנפח כדי להתאים" : "";
+            if (usage.TryGetValue(selected, out u)) { usageBar.Value = u.Item1; usageBar.Max = hasReal ? real : limit; usageLbl.Text = "כונן C:  בשימוש " + u.Item1.ToString("0.0") + " GB מתוך " + (hasReal ? real : limit) + " GB (כולל Windows)   · נבדק " + u.Item2.ToString("HH:mm") + mismatch; }
+            else { usageBar.Value = 0; usageBar.Max = limit; usageLbl.Text = App.HasAgent(r) ? "כונן C: " + limit + " GB (כולל Windows) · לחץ \"בדוק\" כדי לראות כמה בשימוש" : "כונן C: " + limit + " GB"; }
             usageBar.Invalidate();
         }
 
@@ -471,18 +474,19 @@ namespace SharedPC
             Tuple<double, DateTime> u; if (!userAsked && usage.TryGetValue(name, out u) && (DateTime.Now - u.Item2).TotalMinutes < 5) return;
             var full = App.FullUser(r);
             if (userAsked && selected == name) usageLbl.Text = "⏳ בודק…";
-            Task.Run(() => App.Guest(r, "fsutil quota query C:", 60000)).ContinueWith(t =>
+            Task.Run(() => App.GuestPs(r, App.UsageScript, 60000)).ContinueWith(t =>
             {
                 if (!IsHandleCreated) return;
                 var outp = t.IsFaulted ? t.Exception.InnerException.Message : t.Result;
-                double gb = t.IsFaulted ? -1 : ParseUsage(outp, full, Store.S(r, "user"));
+                var pu = t.IsFaulted ? null : App.ParseUsage(outp);
+                double gb = pu == null ? -1 : pu.Item1;
+                if (pu != null) driveSize[name] = pu.Item2;
                 BeginInvoke((Action)(() =>
                 {
                     if (gb >= 0) { usage[name] = Tuple.Create(gb, DateTime.Now); if (selected == name) ShowSelected(); return; }
                     App.Log("usage failed for " + name + ": " + outp);
                     if (selected == name) ShowSelected();
-                    if (userAsked) App.Say(App.GuestOk(outp) ? "עדיין לא נשמרו קבצים של הלקוח (0 GB בשימוש)." : App.GuestProblem(outp));
-                    if (App.GuestOk(outp)) { usage[name] = Tuple.Create(0.0, DateTime.Now); if (selected == name) ShowSelected(); }
+                    if (userAsked) App.Say("לא הצלחתי לבדוק:\n" + App.GuestProblem(outp));
                 }));
             });
         }
@@ -502,12 +506,13 @@ namespace SharedPC
         void SaveGb()
         {
             var r = NeedAgent(); if (r == null) return;
-            var gb = (int)gbNum.Value; var lim = (ulong)gb * 1073741824UL; var warn = (ulong)(lim * 0.9);
-            Busy("משנה נפח", () => App.Guest(r, "fsutil quota modify C: " + warn + " " + lim + " " + App.FullUser(r)), o =>
+            var gb = (int)gbNum.Value; var name = selected;
+            Busy("משנה את גודל הכונן של " + name + " (עד כמה דקות)", () => App.GuestPs(r, App.ResizeScript(gb), 900000), o =>
             {
-                App.Log("quota " + selected + " " + gb + "GB: " + o.Trim());
-                if (!App.GuestOk(o) || (Regex.IsMatch(o, "error|failed|denied", RegexOptions.IgnoreCase) && !o.Contains("successfully"))) { App.Say("השינוי נכשל:\n" + App.GuestProblem(o), MessageBoxIcon.Warning); return; }
-                Store.Set(selected, "diskGB", gb); App.Say("✅ הנפח של " + selected + " עודכן ל-" + gb + " GB."); ShowSelected();
+                App.Log("disk " + name + " " + gb + "GB: " + o.Trim());
+                var msg = App.ResizeMessage(name, gb, o);
+                if (msg.StartsWith("✅")) { Store.Set(name, "diskGB", gb); usage.Remove(name); FetchUsage(name, false); }
+                App.Say(msg, msg.StartsWith("✅") ? MessageBoxIcon.Information : MessageBoxIcon.Warning); ShowSelected();
             });
         }
         void SavePassword()
@@ -655,7 +660,7 @@ namespace SharedPC
     class NewVmForm : Form
     {
         TextBox name = T.Box(380), user = T.Box(380), pass = T.Box(320);
-        NumericUpDown disk = T.Num(5, 2000, 50, 140), ram = T.Num(2, 64, 4, 140);
+        NumericUpDown disk = T.Num(App.MinDiskGB, 2000, 60, 140), ram = T.Num(2, 64, 4, 140);
         CheckBox admin = new CheckBox { Text = "הרשאות מנהל (יוכל להתקין תוכנות)", AutoSize = true, ForeColor = T.Text, Font = T.F(10.5f), Margin = new Padding(3, 14, 3, 3) };
         Label capacity = T.Lbl("", 9.5f);
         public string VmName { get { return name.Text.Trim().ToLower(); } }
@@ -683,7 +688,7 @@ namespace SharedPC
             pw.Controls.Add(pass); pw.Controls.Add(gen); p.Controls.Add(pw);
             var nums = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 10, 0, 0), BackColor = T.Bg };
             var c1 = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, BackColor = T.Bg, Margin = new Padding(0, 0, 30, 0) };
-            c1.Controls.Add(T.Lbl("נפח לקבצים (GB)", 10)); c1.Controls.Add(disk);
+            c1.Controls.Add(T.Lbl("כונן C: (GB, כולל Windows)", 10)); c1.Controls.Add(disk);
             var c2 = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, BackColor = T.Bg };
             c2.Controls.Add(T.Lbl("זיכרון RAM (GB)", 10)); c2.Controls.Add(ram);
             nums.Controls.Add(c1); nums.Controls.Add(c2); p.Controls.Add(nums);

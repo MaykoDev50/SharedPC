@@ -20,7 +20,7 @@ namespace SharedPC
 {
     static partial class App
     {
-        public const string Version = "4.1.0";
+        public const string Version = "4.2.0";
         public const string Title = "SharedPC · ניהול מחשבים";
         public const string HostDir = @"C:\SharedPC-Host";
         public static readonly string VmsFile = Path.Combine(HostDir, "vms.json");
@@ -170,6 +170,44 @@ foreach ($n in $names) { if ($running -notmatch ""`""$n`"""") { & $vbm startvm $
             var args = "guestcontrol \"PC-" + name + "\" run --exe \"C:\\Windows\\System32\\cmd.exe\" --username \"" + Store.S(r, "adminName") +
                        "\" --password \"" + Store.S(r, "adminPassword") + "\" --wait-stdout --wait-stderr --timeout " + timeoutMs + " -- cmd.exe /c " + command;
             return Run(VBM, args, timeoutMs + 15000);
+        }
+        // run a PowerShell script inside (encoded, so no quoting problems)
+        public static string GuestPs(Dictionary<string, object> r, string script, int timeoutMs = 90000)
+        {
+            var b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'; " + script));
+            return Guest(r, "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + b64, timeoutMs);
+        }
+        // drive C: = exactly gb GB (Windows included). Grows or shrinks while the computer runs.
+        public const int MinDiskGB = 20;
+        public static string ResizeScript(int gb)
+        {
+            return "$t=[uint64]" + gb + "*1GB; $p=Get-Partition -DriveLetter C; $s=Get-PartitionSupportedSize -DriveLetter C; " +
+                   "if([math]::Abs([double]$p.Size-[double]$t) -lt 64MB){'OK'} " +
+                   "elseif($t -lt $s.SizeMin){'MIN '+[math]::Ceiling($s.SizeMin/1GB+1)} " +
+                   "elseif($t -gt $s.SizeMax){'MAX '+[math]::Floor($s.SizeMax/1GB)} " +
+                   "else{ try{ Resize-Partition -DriveLetter C -Size $t -ErrorAction Stop; 'OK' } catch { 'ERR '+$_.Exception.Message } }; " +
+                   "fsutil quota disable C: | Out-Null";
+        }
+        public const string UsageScript = "$v=Get-Volume -DriveLetter C; 'USAGE {0} {1}' -f $v.Size,$v.SizeRemaining";
+        // "USAGE <size> <free>" -> (usedGB, sizeGB)
+        public static Tuple<double, double> ParseUsage(string output)
+        {
+            var m = Regex.Match(output, @"USAGE (\d+) (\d+)");
+            if (!m.Success) return null;
+            double size = double.Parse(m.Groups[1].Value), free = double.Parse(m.Groups[2].Value);
+            return Tuple.Create(Math.Round((size - free) / 1073741824.0, 1), Math.Round(size / 1073741824.0));
+        }
+        public static string ResizeMessage(string name, int gb, string o)
+        {
+            var m = Regex.Match(o, @"\b(OK|MIN|MAX|ERR)\b ?(.*)");
+            if (!GuestOk(o) || !m.Success) return "❌ השינוי נכשל:\n" + GuestProblem(o);
+            switch (m.Groups[1].Value)
+            {
+                case "OK": return "✅ הכונן C: של " + name + " הוא עכשיו " + gb + " GB (כולל Windows).";
+                case "MIN": return "❌ אי אפשר להקטין ל-" + gb + " GB: Windows והקבצים שכבר יש ב-" + name + " תופסים יותר.\nהכי קטן שאפשר עכשיו: " + m.Groups[2].Value.Trim() + " GB.";
+                case "MAX": return "❌ אי אפשר להגדיל ל-" + gb + " GB. הכי גדול שאפשר: " + m.Groups[2].Value.Trim() + " GB.";
+                default: return "❌ השינוי נכשל:\n" + m.Groups[2].Value.Trim();
+            }
         }
         public static bool HasAgent(Dictionary<string, object> r) { return Store.S(r, "agent").ToLower() == "true"; }
 

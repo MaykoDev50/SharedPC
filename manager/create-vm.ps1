@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory)] [string]$Name,       # e.g. dani  ->  VirtualBox VM "PC-dani"
     [Parameter(Mandatory)] [string]$User,
     [Parameter(Mandatory)] [string]$PasswordFile, # json with the password (deleted when done)
-    [Parameter(Mandatory)] [int]$DiskGB,        # space for the person's files (Windows itself is extra)
+    [Parameter(Mandatory)] [int]$DiskGB,        # size of drive C: as the person sees it, Windows included (min 20)
     [Parameter(Mandatory)] [int]$RamGB,
     [Parameter(Mandatory)] [int]$Port,
     [switch]$Admin
@@ -47,9 +47,11 @@ Update-VmRecord $Name @{ step = 'ממתין לתור' }
 [void]$build.WaitOne()
 try {
     Update-VmRecord $Name @{ step = 'בונה דיסק' }
-    # the disk can grow up to 512GB (it only takes real space as it fills); the person's limit is a per-user quota
-    $sizeMB = [math]::Max(512, $DiskGB + 40) * 1024
-    Log "Creating virtual disk (grows as needed, limit for the person: $DiskGB GB)..."
+    # the virtual disk can grow up to 2TB (it only takes real space as it fills); drive C: is made exactly $DiskGB GB,
+    # so the person sees exactly what he paid for. Changing the size later = resizing C: inside (no restart).
+    if ($DiskGB -lt 20) { $DiskGB = 20 }
+    $sizeMB = [math]::Max(2040, $DiskGB + 2) * 1024
+    Log "Creating virtual disk (drive C: = $DiskGB GB, Windows included)..."
     if (Test-Path $Vhd) { Dismount-DiskImage -ImagePath $Vhd -ErrorAction SilentlyContinue | Out-Null; Remove-Item $Vhd -Force }
     $dp = Join-Path $VmDir 'diskpart.txt'
     "create vdisk file=`"$Vhd`" maximum=$sizeMB type=expandable" | Set-Content $dp -Encoding ASCII
@@ -61,7 +63,7 @@ try {
     $sys = New-Partition -DiskNumber $n -Size 300MB -AssignDriveLetter
     Format-Volume -Partition $sys -FileSystem FAT32 -NewFileSystemLabel 'System' -Confirm:$false | Out-Null
     New-Partition -DiskNumber $n -Size 16MB -GptType '{e3c9e316-0b5c-4db8-817d-f92df00215ae}' | Out-Null
-    $win = New-Partition -DiskNumber $n -UseMaximumSize -AssignDriveLetter
+    $win = New-Partition -DiskNumber $n -Size ([uint64]$DiskGB * 1GB) -AssignDriveLetter
     Format-Volume -Partition $win -FileSystem NTFS -NewFileSystemLabel 'Windows' -Confirm:$false | Out-Null
     $S = (Get-Partition -DiskNumber $n -PartitionNumber $sys.PartitionNumber).DriveLetter
     $W = (Get-Partition -DiskNumber $n -PartitionNumber $win.PartitionNumber).DriveLetter

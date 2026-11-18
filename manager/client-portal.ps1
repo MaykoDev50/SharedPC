@@ -29,19 +29,41 @@ function Guest($r, [string]$cmd) {
 }
 function Has-Agent($r) { "$($r.agent)" -eq 'True' }
 
+function GuestPs($r, [string]$script, [int]$timeoutMs = 90000) {
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$ProgressPreference='SilentlyContinue'; " + $script))
+    $ErrorActionPreference = 'Continue'
+    (& $script:VBM guestcontrol "PC-$($r.name)" run --exe 'C:\Windows\System32\cmd.exe' --username $r.adminName --password $r.adminPassword `
+        --wait-stdout --wait-stderr --timeout $timeoutMs -- cmd.exe /c "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $b64" 2>&1 | Out-String)
+}
+# used GB on drive C: (Windows included); also remembers the real size of C:
 function Get-UsageGB($r) {
     $u = $script:Usage[$r.name]
     if ($u -and ((Get-Date) - $u.at).TotalMinutes -lt 5) { return $u.gb }
     if (-not (Has-Agent $r) -or (Get-VmState "PC-$($r.name)") -ne 'running') { return $null }
-    $out = Guest $r 'fsutil quota query C:'
-    foreach ($block in ($out -replace "`r", '') -split "`n\s*`n") {
-        if ($block -match [regex]::Escape('\' + $r.user) -and $block -match 'Quota Used\s*[:=]\s*([\d,\.]+)') {
-            $gb = [math]::Round(([double]($Matches[1] -replace '[,\.]', '')) / 1GB, 2)
-            $script:Usage[$r.name] = @{ gb = $gb; at = Get-Date }
-            return $gb
-        }
+    $out = GuestPs $r "`$v=Get-Volume -DriveLetter C; 'USAGE {0} {1}' -f `$v.Size,`$v.SizeRemaining" 60000
+    if ($out -match 'USAGE (\d+) (\d+)') {
+        $size = [double]$Matches[1]; $free = [double]$Matches[2]
+        $gb = [math]::Round(($size - $free) / 1GB, 1)
+        $script:Usage[$r.name] = @{ gb = $gb; size = [math]::Round($size / 1GB); at = Get-Date }
+        return $gb
     }
     $null
+}
+function Resize-Drive($r, [int]$gb) {
+    $o = GuestPs $r ("`$t=[uint64]$gb*1GB; `$p=Get-Partition -DriveLetter C; `$s=Get-PartitionSupportedSize -DriveLetter C; " +
+        "if([math]::Abs([double]`$p.Size-[double]`$t) -lt 64MB){'OK'} elseif(`$t -lt `$s.SizeMin){'MIN '+[math]::Ceiling(`$s.SizeMin/1GB+1)} " +
+        "elseif(`$t -gt `$s.SizeMax){'MAX '+[math]::Floor(`$s.SizeMax/1GB)} else{ try{ Resize-Partition -DriveLetter C -Size `$t -ErrorAction Stop; 'OK' } catch { 'ERR '+`$_.Exception.Message } }; " +
+        "fsutil quota disable C: | Out-Null") 900000
+    if ($o -match 'not installed or not ready') { return @('err', 'המחשב עוד עולה – נסה שוב בעוד דקה.') }
+    if ($o -match '\b(OK|MIN|MAX|ERR)\b ?(.*)') {
+        switch ($Matches[1]) {
+            'OK'  { $script:Usage.Remove($r.name); return @('ok', "הכונן C: של $($r.name) הוא עכשיו $gb GB (כולל Windows).") }
+            'MIN' { return @('err', "אי אפשר להקטין ל-$gb GB: Windows והקבצים שכבר יש בו תופסים יותר. הכי קטן שאפשר עכשיו: $($Matches[2].Trim()) GB.") }
+            'MAX' { return @('err', "אי אפשר להגדיל ל-$gb GB. הכי גדול שאפשר: $($Matches[2].Trim()) GB.") }
+            default { return @('err', "השינוי נכשל: $($Matches[2].Trim())") }
+        }
+    }
+    @('err', 'השינוי נכשל (המחשב דלוק?).')
 }
 
 # ---------------- HTML ----------------
@@ -103,9 +125,10 @@ function Dash-Page($r, [string]$msg = '', [string]$kind = 'ok') {
     $limit = [int]$r.diskGB
     $used = Get-UsageGB $r
     $usage = if ($null -ne $used) {
-        $pct = if ($limit -gt 0) { [math]::Min(100, [math]::Round($used / $limit * 100)) } else { 0 }
-        "<div class='bar'><i style='width:$pct%'></i></div><div class='muted'>בשימוש <b style='color:#ecf0f7'>$used GB</b> מתוך $limit GB</div>"
-    } else { "<div class='muted'>הנפח שלך: <b style='color:#ecf0f7'>$limit GB</b></div>" }
+        $size = if ($script:Usage[$r.name].size) { $script:Usage[$r.name].size } else { $limit }
+        $pct = if ($size -gt 0) { [math]::Min(100, [math]::Round($used / $size * 100)) } else { 0 }
+        "<div class='bar'><i style='width:$pct%'></i></div><div class='muted'>כונן C: בשימוש <b style='color:#ecf0f7'>$used GB</b> מתוך $size GB (כולל Windows)</div>"
+    } else { "<div class='muted'>הכונן שלך: <b style='color:#ecf0f7'>$limit GB</b> (כולל Windows)</div>" }
     $power = if ($running) { "<form method='post' action='/restart' onsubmit=""return confirm('להפעיל מחדש? חלונות פתוחים ייסגרו.')""><button class='ghost'>↻ הפעלה מחדש</button></form>" }
              else { "<form method='post' action='/start'><button class='green'>▶ הדלק את המחשב</button></form>" }
     $pwCard = if (Has-Agent $r) { @"
@@ -301,7 +324,7 @@ function Admin-Page([string]$msg = '', [string]$kind = 'ok') {
 <div class="card">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
 <div><h2 style="margin:0">🖥️ $n</h2><div class="muted">$(Enc "$(CompName $r.name)\$($r.user)") · ${ip}:$($r.port) · $($r.diskGB) GB · RAM $($r.ramGB) GB</div></div>$st</div>
-$(if ($r.status -eq 'ready') { $u = $script:Usage[$r.name]; if ($u) { "<div class='muted' style='margin-top:8px'>💾 בשימוש <b style='color:#ecf0f7'>$($u.gb) GB</b> מתוך $($r.diskGB) GB · נבדק $($u.at.ToString('HH:mm'))</div>" } else { "<div class='muted' style='margin-top:8px'>💾 מגבלה: $($r.diskGB) GB</div>" } })
+$(if ($r.status -eq 'ready') { $u = $script:Usage[$r.name]; if ($u) { "<div class='muted' style='margin-top:8px'>💾 כונן C: בשימוש <b style='color:#ecf0f7'>$($u.gb) GB</b> מתוך $($u.size) GB (כולל Windows) · נבדק $($u.at.ToString('HH:mm'))$(if ([math]::Abs($u.size - [int]$r.diskGB) -gt 1) { " · ⚠️ מוגדר $($r.diskGB) GB – לחץ 'שמור נפח' כדי להתאים" })</div>" } else { "<div class='muted' style='margin-top:8px'>💾 כונן C: $($r.diskGB) GB (כולל Windows)</div>" } })
 <details style="margin-top:12px"><summary class="muted" style="cursor:pointer">פרטי חיבור ללקוח</summary>
 <textarea readonly style="width:100%;height:110px;margin-top:8px;background:#1a2235;color:#ecf0f7;border:1px solid #2d3852;border-radius:10px;padding:10px;font:inherit;direction:rtl">$details</textarea></details>
 <div class="actions" style="margin-top:12px">
@@ -313,7 +336,7 @@ $(if ($r.status -eq 'ready') { $u = $script:Usage[$r.name]; if ($u) { "<div clas
 </div>
 <details style="margin-top:12px"><summary class="muted" style="cursor:pointer">⚙️ הגדרות</summary>
 <form method="post" action="/admin/vm" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="gb">
-<div style="flex:1;min-width:140px"><label>נפח (GB)</label><input name="v" type="number" min="5" max="2000" value="$($r.diskGB)"></div><button class="small">שמור נפח</button></form>
+<div style="flex:1;min-width:140px"><label>כונן C: (GB, כולל Windows)</label><input name="v" type="number" min="20" max="2000" value="$($r.diskGB)"></div><button class="small">שמור נפח</button></form>
 <form method="post" action="/admin/vm" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="password">
 <div style="flex:1;min-width:140px"><label>סיסמה חדשה ללקוח</label><input name="v" value="$(New-RandomPassword)"></div><button class="small">שנה סיסמה</button></form>
 <form method="post" action="/admin/vm" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><input type="hidden" name="n" value="$n"><input type="hidden" name="a" value="ram">
@@ -335,7 +358,7 @@ $m
 <div><label>שם המחשב (באנגלית)</label><input name="name" required pattern="[a-z0-9-]{2,12}" placeholder="dani"></div>
 <div><label>שם משתמש</label><input name="user" required pattern="[A-Za-z0-9._-]{3,20}" placeholder="dani"></div>
 <div><label>סיסמה</label><input name="pw" required value="$(New-RandomPassword)"></div>
-<div><label>נפח לקבצים (GB)</label><input name="gb" type="number" min="5" max="2000" value="50"></div>
+<div><label>כונן C: (GB, כולל Windows)</label><input name="gb" type="number" min="20" max="2000" value="60"></div>
 <div><label>זיכרון RAM (GB)</label><input name="ram" type="number" min="2" max="64" value="4"></div>
 <div><label>&nbsp;</label><label style="display:flex;gap:8px;align-items:center;margin:12px 0"><input type="checkbox" name="admin" value="1" style="width:auto"> הרשאות מנהל ללקוח</label></div>
 </div>
@@ -388,10 +411,11 @@ function Admin-Action($ctx, $req) {
         }
         'gb' {
             if (-not (Has-Agent $r)) { $msg = 'המחשב הזה נוצר בגרסה ישנה – אי אפשר לשנות לו נפח.'; $kind = 'err'; break }
-            if ($v -notmatch '^\d+$' -or [int]$v -lt 5) { $msg = 'נפח לא תקין.'; $kind = 'err'; break }
-            $lim = [uint64]$v * 1GB
-            $o = Guest $r "fsutil quota modify C: $([uint64]($lim * 0.9)) $lim $(CompName $name)\$($r.user)"
-            if ($o -match 'not installed or not ready') { $msg = 'המחשב עוד עולה – נסה שוב בעוד דקה.'; $kind = 'err' } elseif ($o -match 'error|denied') { $msg = 'שינוי הנפח נכשל (המחשב דלוק?).'; $kind = 'err' } else { Update-VmRecord $name @{ diskGB = [int]$v }; $msg = "הנפח של $name עודכן ל-$v GB." }
+            if ($v -notmatch '^\d+$' -or [int]$v -lt 20) { $msg = 'הגודל המינימלי הוא 20 GB (Windows עצמו תופס כ-14).'; $kind = 'err'; break }
+            if ((Get-VmState $vm) -ne 'running') { $msg = "$name כבוי – הדלק אותו כדי לשנות גודל."; $kind = 'err'; break }
+            $res = Resize-Drive $r ([int]$v)
+            if ($res[0] -eq 'ok') { Update-VmRecord $name @{ diskGB = [int]$v } }
+            $kind = $res[0]; $msg = $res[1]
         }
         'password' {
             if (-not (Has-Agent $r)) { $msg = 'המחשב הזה נוצר בגרסה ישנה – אי אפשר לשנות לו סיסמה.'; $kind = 'err'; break }
@@ -412,11 +436,11 @@ function Admin-Action($ctx, $req) {
             if ((Get-VmState $vm) -ne 'running') { $msg = "$name כבוי – הדלק אותו כדי לבדוק נפח."; $kind = 'err'; break }
             $script:Usage.Remove($name)
             $used = Get-UsageGB $r
-            if ($null -ne $used) { $msg = "$name משתמש ב-$used GB מתוך $($r.diskGB) GB." }
-            else { $o = Guest $r 'fsutil quota query C:'
+            if ($null -ne $used) { $msg = "בכונן C: של $name בשימוש $used GB מתוך $($script:Usage[$name].size) GB (כולל Windows)." }
+            else { $o = GuestPs $r 'Get-Volume -DriveLetter C | Out-Null' 60000
                    if ($o -match 'not installed or not ready') { $msg = 'המחשב עוד עולה – נסה שוב בעוד דקה.'; $kind = 'err' }
                    elseif ($o -match 'VBoxManage.exe: error') { $msg = 'הבדיקה נכשלה. נסה שוב בעוד דקה.'; $kind = 'err' }
-                   else { $script:Usage[$name] = @{ gb = 0; at = Get-Date }; $msg = "$name משתמש ב-0 GB מתוך $($r.diskGB) GB." } }
+                   else { $msg = 'הבדיקה נכשלה. נסה שוב בעוד דקה.'; $kind = 'err' } }
         }
         default { $msg = 'פעולה לא מוכרת.'; $kind = 'err' }
     }
@@ -433,7 +457,7 @@ function Admin-Create($ctx, $req) {
     $err = if ($name -notmatch '^[a-z0-9-]{2,12}$') { 'שם המחשב: באנגלית, 2–12 תווים.' }
            elseif ($recs | Where-Object { $_.name -eq $name }) { 'כבר יש מחשב בשם הזה.' }
            elseif ($user -notmatch '^[A-Za-z0-9._-]{3,20}$') { 'שם משתמש: באנגלית, 3–20 תווים.' }
-           elseif ($gb -notmatch '^\d+$' -or [int]$gb -lt 5) { 'נפח לא תקין.' }
+           elseif ($gb -notmatch '^\d+$' -or [int]$gb -lt 20) { 'הגודל המינימלי הוא 20 GB (Windows עצמו תופס כ-14).' }
            elseif ($ram -notmatch '^\d+$' -or [int]$ram -lt 2) { 'זיכרון לא תקין.' }
            else { Check-Password $pw $user }
     if ($err) { Send $ctx 400 (Admin-Page (Enc $err) 'err'); return }
